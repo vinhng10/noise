@@ -55,12 +55,11 @@ class NSNET2Dataset(Dataset):
         self.win_length = win_length
         self.hop_length = hop_length
         self.eps = eps
-        self.noisy_audios = sorted(list(Path("data/noisy").rglob("*.wav")))
-        self.clean_audios = sorted(list(Path("data/clean").rglob("*.wav")))
-
-        assert len(self.noisy_audios) == len(
-            self.clean_audios
-        ), "Numbers of noisy and clean audios are not equal"
+        self.files = []
+        for clean_audio in Path("data/clean").rglob("*.wav"):
+            fileid = clean_audio.stem[6:]
+            noisy_audio = list(Path("data/noisy").glob(f"*{fileid}.wav"))[0]
+            self.files.append((noisy_audio, clean_audio))
 
     def log_power_spectrum(self, audio_path: PathOrStr):
         audio, _ = librosa.load(audio_path, sr=self.sampling_rate)
@@ -76,15 +75,12 @@ class NSNET2Dataset(Dataset):
         return audio
 
     def __len__(self) -> int:
-        return len(self.noisy_audios)
+        return len(self.files)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
-        noisy_audio = torch.from_numpy(
-            self.log_power_spectrum(self.noisy_audios[index]).T
-        )
-        clean_audio = torch.from_numpy(
-            self.log_power_spectrum(self.clean_audios[index]).T
-        )
+        noisy_audio, clean_audio = self.files[index]
+        noisy_audio = torch.from_numpy(self.log_power_spectrum(noisy_audio).T)
+        clean_audio = torch.from_numpy(self.log_power_spectrum(clean_audio).T)
 
         return noisy_audio, clean_audio
 
