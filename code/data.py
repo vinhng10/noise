@@ -42,6 +42,7 @@ class NSNET2Dataset(Dataset):
     def __init__(
         self,
         split: str,
+        data_dir: str,
         sampling_rate: int = 48000,
         n_fft: int = 512,
         win_length: int = 512,
@@ -50,15 +51,18 @@ class NSNET2Dataset(Dataset):
     ):
         super().__init__()
         self.split = split
+        self.data_dir = Path(data_dir)
         self.sampling_rate = sampling_rate
         self.n_fft = n_fft
         self.win_length = win_length
         self.hop_length = hop_length
         self.eps = eps
         self.files = []
-        for clean_audio in Path("data/clean").rglob("*.wav"):
+        for clean_audio in (self.data_dir / split / "clean").rglob("*.wav"):
             fileid = clean_audio.stem[6:]
-            noisy_audio = list(Path("data/noisy").glob(f"*{fileid}.wav"))[0]
+            noisy_audio = list(
+                (self.data_dir / split / "noisy").glob(f"*{fileid}.wav")
+            )[0]
             self.files.append((noisy_audio, clean_audio))
 
     def log_power_spectrum(self, audio_path: PathOrStr):
@@ -94,6 +98,7 @@ class NSNET2DataModule(DataModule):
 
     def __init__(
         self,
+        data_dir: str,
         sampling_rate: int = 48000,
         n_fft: int = 512,
         win_length: int = 512,
@@ -116,6 +121,7 @@ class NSNET2DataModule(DataModule):
         if stage == "fit":
             self.trainset = NSNET2Dataset(
                 "train",
+                self.hparams.data_dir,
                 self.hparams.sampling_rate,
                 self.hparams.n_fft,
                 self.hparams.win_length,

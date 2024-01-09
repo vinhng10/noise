@@ -9,7 +9,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
-      save_dir: "./logs"
+      save_dir: "/opt/ml/model"
       name: null
       version: nsnet2-1.0.0
       log_graph: false
@@ -70,6 +70,7 @@ trainer:
   reload_dataloaders_every_n_epochs: 0
   default_root_dir: null
 data:
+  data_dir: /opt/ml/input/data
   sampling_rate: 48000
   n_fft: 512
   win_length: 512

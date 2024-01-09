@@ -140,7 +140,7 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
                 setattr(module, name, nn.Dropout(child.p, inplace=self.hparams.inplace))
             elif list(child.named_children()):
                 self._replace(child)
-
+    
     def training_step(self, batch, batch_idx):
         return self._shared_step(batch, "train")
 
@@ -166,7 +166,7 @@ class NSNET2(Model):
         self.ff2 = nn.Linear(400, 600)
         self.ff3 = nn.Linear(600, 600)
         self.ff4 = nn.Linear(600, 255)
-
+    
     def forward(self, inputs: Tensor) -> Tensor:
         outputs = F.relu(self.ff1(inputs))
         outputs, _ = self.gru(outputs)
