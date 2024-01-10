@@ -128,6 +128,7 @@ class NSNET2DataModule(DataModule):
                 self.hparams.hop_length,
                 self.hparams.eps,
             )
+
         #     self.valset = ReeoDataset(
         #         "val",
         #         self.hparams.cache_path,
