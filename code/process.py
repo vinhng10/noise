@@ -293,6 +293,12 @@ def main_gen(params):
         for i in range(len(audio_signals)):
             try:
                 audiowrite(file_paths[i], audio_signals[i], params["fs"])
+                sess = sagemaker.Session(default_bucket=params["bucket"])
+                sess.upload_data(
+                    file_paths[i],
+                    bucket=params["bucket"],
+                    key_prefix=Path(file_paths[i]).parent,
+                )
             except Exception as e:
                 print(str(e))
         print("===>", "write resultant")
@@ -353,6 +359,9 @@ def main_body():
     params["audio_length"] = float(cfg["audio_length"])
     params["silence_length"] = float(cfg["silence_length"])
     params["total_hours"] = float(cfg["total_hours"])
+
+    # AWS configs:
+    params["bucket"] = str(cfg["bucket"])
 
     # clean singing speech
     params["use_singing_data"] = int(cfg["use_singing_data"])
