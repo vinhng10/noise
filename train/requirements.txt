@@ -1,5 +1,6 @@
+sagemaker
 librosa
-# torch
+torch
 lightning
 tqdm
 pyyaml

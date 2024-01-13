@@ -18,9 +18,10 @@ if __name__ == "__main__":
         sagemaker_session=sess,
         instance_type="ml.g4dn.xlarge",
         instance_count=1,
+        volume_size_in_gb=100,
         framework_version="2.1",
         py_version="py310",
-        source_dir="code",
+        source_dir="train",
         hyperparameters={},
     )
-    estimator.fit({"train": "s3://db-noise/train"})
+    estimator.fit({"train": "s3://db-noise/datasets/train"})

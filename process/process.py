@@ -6,18 +6,13 @@ import random
 import shutil
 import sys
 import tarfile
-import zipfile
 import librosa
 import pandas as pd
-import requests
-import sagemaker
-
 import numpy as np
 import configparser as CP
-
+from typing import List
 from pathlib import Path
 from scipy import signal
-from scipy.io import wavfile
 from tqdm import tqdm
 from random import shuffle
 from audiolib import (
@@ -28,7 +23,7 @@ from audiolib import (
     is_clipped,
 )
 
-
+BASE_PATH = Path("/opt/ml/processing/")
 MAXTRIES = 50
 MAXFILELEN = 100
 
@@ -293,15 +288,9 @@ def main_gen(params):
         for i in range(len(audio_signals)):
             try:
                 audiowrite(file_paths[i], audio_signals[i], params["fs"])
-                sess = sagemaker.Session(default_bucket=params["bucket"])
-                sess.upload_data(
-                    file_paths[i],
-                    bucket=params["bucket"],
-                    key_prefix=Path(file_paths[i]).parent,
-                )
             except Exception as e:
                 print(str(e))
-        print("===>", "write resultant")
+        print(f"===> Generated {file_num}.wav")
 
         file_num += 1
 
@@ -323,7 +312,7 @@ def main_body():
     # Configurations: read noisyspeech_synthesizer.cfg and gather inputs
     parser.add_argument(
         "--cfg",
-        default="noisyspeech_synthesizer.cfg",
+        default="process.cfg",
         help="Read noisyspeech_synthesizer.cfg for all the details",
     )
     parser.add_argument("--cfg_str", type=str, default="noisy_speech")
@@ -555,154 +544,152 @@ def main_body():
     )
 
 
-def download(name: str, category: str, parts: list[str], bucket: str):
-    download_dir = Path("datasets/downloads") / name
-    download_dir.mkdir(parents=True, exist_ok=True)
-    data_dir = Path("datasets") / category
+def download_and_extract(names: List[str], category: str):
+    download_dir = BASE_PATH / "downloads"
+    data_dir = BASE_PATH / category
     data_dir.mkdir(parents=True, exist_ok=True)
-    ext = "zip" if "zip" in parts[0] else "tgz"
 
-    sess = sagemaker.Session(default_bucket=bucket)
+    for name in names:
+        print("============================")
+        print(f"Extract {name}")
+        print("============================")
+        parts = sorted(list(download_dir.rglob(f"*{name}*")))
+        with open(download_dir / f"{name}.tgz", "wb") as file:
+            for part in tqdm(parts, desc="Combine file parts"):
+                with open(part, "rb") as part_file:
+                    shutil.copyfileobj(part_file, file)
+                part.unlink()
 
-    for part in tqdm(parts, desc="Download file parts"):
-        sess.download_data(download_dir, bucket, part)
-
-    parts = sorted(list(download_dir.rglob(f"*")))
-    with open(download_dir / f"{name}.{ext}", "wb") as file:
-        for part in tqdm(parts, desc="Combine file parts"):
-            with open(part, "rb") as part_file:
-                shutil.copyfileobj(part_file, file)
-            part.unlink()
-
-    print("Extract file:")
-    if ext == "zip":
-        with zipfile.ZipFile(download_dir / f"{name}.{ext}", "r") as zip:
-            zip.extractall(data_dir)
-    else:
-        with tarfile.open(download_dir / f"{name}.{ext}", "r") as tar:
+        print("Extract file:")
+        with tarfile.open(download_dir / f"{name}.tgz", "r") as tar:
             tar.extractall(data_dir)
 
 
 if __name__ == "__main__":
     datasets = {
-        "french_speech": {
-            "category": "clean",
-            "parts": [
-                "headset-training/italian_speech.tar.gz.partaa",
-                "headset-training/italian_speech.tar.gz.partab",
-                "headset-training/italian_speech.tar.gz.partac",
-                "headset-training/italian_speech.tar.gz.partad",
-                "headset-training/italian_speech.tar.gz.partae",
-                "headset-training/italian_speech.tar.gz.partah",
-            ],
-        },
-        "german_speech": {
-            "category": "clean",
-            "parts": [
-                "headset-training/german_speech.tgz.partaa",
-                "headset-training/german_speech.tgz.partab",
-                "headset-training/german_speech.tgz.partac",
-                "headset-training/german_speech.tgz.partad",
-                "headset-training/german_speech.tgz.partae",
-                "headset-training/german_speech.tgz.partaf",
-                "headset-training/german_speech.tgz.partag",
-                "headset-training/german_speech.tgz.partah",
-                "headset-training/german_speech.tgz.partaj",
-                "headset-training/german_speech.tgz.partal",
-                "headset-training/german_speech.tgz.partam",
-                "headset-training/german_speech.tgz.partan",
-                "headset-training/german_speech.tgz.partao",
-                "headset-training/german_speech.tgz.partap",
-                "headset-training/german_speech.tgz.partaq",
-                "headset-training/german_speech.tgz.partar",
-                "headset-training/german_speech.tgz.partas",
-                "headset-training/german_speech.tgz.partat",
-                "headset-training/german_speech.tgz.partau",
-                "headset-training/german_speech.tgz.partav",
-                "headset-training/german_speech.tgz.partaw",
-            ],
-        },
-        "italian_speech": {
-            "category": "clean",
-            "parts": [
-                "headset-training/italian_speech.tgz.partaa",
-                "headset-training/italian_speech.tgz.partab",
-                "headset-training/italian_speech.tgz.partac",
-                "headset-training/italian_speech.tgz.partad",
-            ],
-        },
-        "russian_speech": {
-            "category": "clean",
-            "parts": ["headset-training/russian_speech.tgz"],
-        },
-        "read_speech": {
-            "category": "clean",
-            "parts": [
-                "headset-training/read_speech.tgz.partaa",
-                "headset-training/read_speech.tgz.partab",
-                "headset-training/read_speech.tgz.partac",
-                "headset-training/read_speech.tgz.partad",
-                "headset-training/read_speech.tgz.partae",
-                "headset-training/read_speech.tgz.partaf",
-                "headset-training/read_speech.tgz.partag",
-                "headset-training/read_speech.tgz.partah",
-                "headset-training/read_speech.tgz.partai",
-                "headset-training/read_speech.tgz.partaj",
-                "headset-training/read_speech.tgz.partak",
-                "headset-training/read_speech.tgz.partal",
-                "headset-training/read_speech.tgz.partam",
-                "headset-training/read_speech.tgz.partan",
-                "headset-training/read_speech.tgz.partao",
-                "headset-training/read_speech.tgz.partap",
-                "headset-training/read_speech.tgz.partaq",
-                "headset-training/read_speech.tgz.partar",
-                "headset-training/read_speech.tgz.partas",
-                "headset-training/read_speech.tgz.partat",
-                "headset-training/read_speech.tgz.partau",
-            ],
-        },
-        "spanish_speech": {
-            "category": "clean",
-            "parts": [
-                "headset-training/spanish_speech.tgz.partaa",
-                "headset-training/spanish_speech.tgz.partab",
-                "headset-training/spanish_speech.tgz.partac",
-                "headset-training/spanish_speech.tgz.partad",
-                "headset-training/spanish_speech.tgz.partae",
-                "headset-training/spanish_speech.tgz.partaf",
-                "headset-training/spanish_speech.tgz.partag",
-            ],
-        },
-        "vctk_wav48_silence_trimmed": {
-            "category": "clean",
-            "parts": [
-                "headset-training/vctk_wav48_silence_trimmed.tgz.partaa",
-                "headset-training/vctk_wav48_silence_trimmed.tgz.partab",
-                "headset-training/vctk_wav48_silence_trimmed.tgz.partac",
-            ],
-        },
-        "noise_audioset": {
-            "category": "noise",
-            "parts": [
-                "noise-ir/datasets_fullband.noise_fullband.audioset_000.tar.bz2",
-                "noise-ir/datasets_fullband.noise_fullband.audioset_001.tar.bz2",
-                "noise-ir/datasets_fullband.noise_fullband.audioset_002.tar.bz2",
-                "noise-ir/datasets_fullband.noise_fullband.audioset_003.tar.bz2",
-                "noise-ir/datasets_fullband.noise_fullband.audioset_004.tar.bz2",
-                "noise-ir/datasets_fullband.noise_fullband.audioset_005.tar.bz2",
-                "noise-ir/datasets_fullband.noise_fullband.audioset_006.tar.bz2",
-            ],
-        },
-        "noise_freesound": {
-            "category": "noise",
-            "parts": [
-                "noise-ir/datasets_fullband.noise_fullband.freesound_000.tar.bz2",
-                "noise-ir/datasets_fullband.noise_fullband.freesound_001.tar.bz2",
-            ],
-        },
+        "clean": ["vctk_wav48_silence_trimmed"],
+        "noise": ["noise_freesound"],
     }
 
-    for name, value in datasets.items():
-        download(name, value["category"], value["parts"], "db-noise")
+    for category, names in datasets.items():
+        download_and_extract(names, category)
 
     main_body()
+
+    # datasets = {
+    #     "french_speech": {
+    #         "category": "clean",
+    #         "parts": [
+    #             "headset-training/italian_speech.tar.gz.partaa",
+    #             "headset-training/italian_speech.tar.gz.partab",
+    #             "headset-training/italian_speech.tar.gz.partac",
+    #             "headset-training/italian_speech.tar.gz.partad",
+    #             "headset-training/italian_speech.tar.gz.partae",
+    #             "headset-training/italian_speech.tar.gz.partah",
+    #         ],
+    #     },
+    #     "german_speech": {
+    #         "category": "clean",
+    #         "parts": [
+    #             "headset-training/german_speech.tgz.partaa",
+    #             "headset-training/german_speech.tgz.partab",
+    #             "headset-training/german_speech.tgz.partac",
+    #             "headset-training/german_speech.tgz.partad",
+    #             "headset-training/german_speech.tgz.partae",
+    #             "headset-training/german_speech.tgz.partaf",
+    #             "headset-training/german_speech.tgz.partag",
+    #             "headset-training/german_speech.tgz.partah",
+    #             "headset-training/german_speech.tgz.partaj",
+    #             "headset-training/german_speech.tgz.partal",
+    #             "headset-training/german_speech.tgz.partam",
+    #             "headset-training/german_speech.tgz.partan",
+    #             "headset-training/german_speech.tgz.partao",
+    #             "headset-training/german_speech.tgz.partap",
+    #             "headset-training/german_speech.tgz.partaq",
+    #             "headset-training/german_speech.tgz.partar",
+    #             "headset-training/german_speech.tgz.partas",
+    #             "headset-training/german_speech.tgz.partat",
+    #             "headset-training/german_speech.tgz.partau",
+    #             "headset-training/german_speech.tgz.partav",
+    #             "headset-training/german_speech.tgz.partaw",
+    #         ],
+    #     },
+    #     "italian_speech": {
+    #         "category": "clean",
+    #         "parts": [
+    #             "headset-training/italian_speech.tgz.partaa",
+    #             "headset-training/italian_speech.tgz.partab",
+    #             "headset-training/italian_speech.tgz.partac",
+    #             "headset-training/italian_speech.tgz.partad",
+    #         ],
+    #     },
+    #     "russian_speech": {
+    #         "category": "clean",
+    #         "parts": ["headset-training/russian_speech.tgz"],
+    #     },
+    #     "read_speech": {
+    #         "category": "clean",
+    #         "parts": [
+    #             "headset-training/read_speech.tgz.partaa",
+    #             "headset-training/read_speech.tgz.partab",
+    #             "headset-training/read_speech.tgz.partac",
+    #             "headset-training/read_speech.tgz.partad",
+    #             "headset-training/read_speech.tgz.partae",
+    #             "headset-training/read_speech.tgz.partaf",
+    #             "headset-training/read_speech.tgz.partag",
+    #             "headset-training/read_speech.tgz.partah",
+    #             "headset-training/read_speech.tgz.partai",
+    #             "headset-training/read_speech.tgz.partaj",
+    #             "headset-training/read_speech.tgz.partak",
+    #             "headset-training/read_speech.tgz.partal",
+    #             "headset-training/read_speech.tgz.partam",
+    #             "headset-training/read_speech.tgz.partan",
+    #             "headset-training/read_speech.tgz.partao",
+    #             "headset-training/read_speech.tgz.partap",
+    #             "headset-training/read_speech.tgz.partaq",
+    #             "headset-training/read_speech.tgz.partar",
+    #             "headset-training/read_speech.tgz.partas",
+    #             "headset-training/read_speech.tgz.partat",
+    #             "headset-training/read_speech.tgz.partau",
+    #         ],
+    #     },
+    #     "spanish_speech": {
+    #         "category": "clean",
+    #         "parts": [
+    #             "headset-training/spanish_speech.tgz.partaa",
+    #             "headset-training/spanish_speech.tgz.partab",
+    #             "headset-training/spanish_speech.tgz.partac",
+    #             "headset-training/spanish_speech.tgz.partad",
+    #             "headset-training/spanish_speech.tgz.partae",
+    #             "headset-training/spanish_speech.tgz.partaf",
+    #             "headset-training/spanish_speech.tgz.partag",
+    #         ],
+    #     },
+    #     "vctk_wav48_silence_trimmed": {
+    #         "category": "clean",
+    #         "parts": [
+    #             "headset-training/vctk_wav48_silence_trimmed.tgz.partaa",
+    #             "headset-training/vctk_wav48_silence_trimmed.tgz.partab",
+    #             "headset-training/vctk_wav48_silence_trimmed.tgz.partac",
+    #         ],
+    #     },
+    #     "noise_audioset": {
+    #         "category": "noise",
+    #         "parts": [
+    #             "noise-ir/datasets_fullband.noise_fullband.audioset_000.tar.bz2",
+    #             "noise-ir/datasets_fullband.noise_fullband.audioset_001.tar.bz2",
+    #             "noise-ir/datasets_fullband.noise_fullband.audioset_002.tar.bz2",
+    #             "noise-ir/datasets_fullband.noise_fullband.audioset_003.tar.bz2",
+    #             "noise-ir/datasets_fullband.noise_fullband.audioset_004.tar.bz2",
+    #             "noise-ir/datasets_fullband.noise_fullband.audioset_005.tar.bz2",
+    #             "noise-ir/datasets_fullband.noise_fullband.audioset_006.tar.bz2",
+    #         ],
+    #     },
+    #     "noise_freesound": {
+    #         "category": "noise",
+    #         "parts": [
+    #             "noise-ir/datasets_fullband.noise_fullband.freesound_000.tar.bz2",
+    #             "noise-ir/datasets_fullband.noise_fullband.freesound_001.tar.bz2",
+    #         ],
+    #     },
+    # }
