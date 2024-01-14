@@ -550,14 +550,16 @@ def download_and_extract(names: List[str], category: str):
     data_dir.mkdir(parents=True, exist_ok=True)
 
     for name in names:
+        whole_file = download_dir / f"{name}.tgz"
         parts = sorted(list(download_dir.rglob(f"*{name}*")))
-        with open(download_dir / f"{name}.tgz", "wb") as file:
+        with open(whole_file, "wb") as file:
             for part in tqdm(parts, desc="Combine file parts"):
                 with open(part, "rb") as part_file:
                     shutil.copyfileobj(part_file, file)
                 part.unlink()
-        with tarfile.open(download_dir / f"{name}.tgz", "r") as tar:
+        with tarfile.open(whole_file, "r") as tar:
             tar.extractall(data_dir)
+        whole_file.unlink()
 
 
 if __name__ == "__main__":

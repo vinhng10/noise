@@ -10,7 +10,7 @@ if __name__ == "__main__":
         role="arn:aws:iam::757330975535:role/service-role/AmazonSageMaker-ExecutionRole-20231205T113478",
         instance_type="ml.m5.xlarge",
         instance_count=1,
-        volume_size_in_gb=100,
+        volume_size_in_gb=1024,
     )
 
     processor.run(
