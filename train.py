@@ -20,5 +20,9 @@ if __name__ == "__main__":
         hyperparameters={},
     )
     estimator.fit(
-        {"train": "s3://db-noise/datasets/train", "val": "s3://db-noise/datasets/val"}
+        {
+            "train": "s3://db-noise/datasets/train",
+            "val": "s3://db-noise/datasets/val",
+            "mos": "s3://db-noise/mos",
+        }
     )

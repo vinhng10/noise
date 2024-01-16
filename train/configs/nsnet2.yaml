@@ -74,8 +74,8 @@ model:
   n_fft: 512
   win_length: 512
   hop_length: 128
-  p835_model_path: mos/p835.onnx
-  p808_model_path: mos/p808.onnx
+  p835_model_path: /opt/ml/input/data/mos/p835.onnx
+  p808_model_path: /opt/ml/input/data/mos/p808.onnx
 data:
   data_dir: /opt/ml/input/data
   sampling_rate: 16000
@@ -99,8 +99,8 @@ optimizer:
   differentiable: false
   fused: null
 lr_scheduler:
-  monitor: train_loss
-  mode: min
+  monitor: val_mos_ovr
+  mode: max
   factor: 0.5
   patience: 10
   threshold: 1e-4
