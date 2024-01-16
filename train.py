@@ -4,11 +4,6 @@ from sagemaker.pytorch import PyTorch
 
 if __name__ == "__main__":
     sess = sagemaker.Session(default_bucket="db-noise")
-    # role = sess.get_caller_identity_arn()
-    # inputs = sess.upload_data(
-    #     path="data", bucket=sess.default_bucket(), key_prefix="train"
-    # )
-    # print(role)
 
     estimator = PyTorch(
         entry_point="main.py",
@@ -24,4 +19,6 @@ if __name__ == "__main__":
         source_dir="train",
         hyperparameters={},
     )
-    estimator.fit({"train": "s3://db-noise/datasets/train"})
+    estimator.fit(
+        {"train": "s3://db-noise/datasets/train", "val": "s3://db-noise/datasets/val"}
+    )

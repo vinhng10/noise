@@ -9,7 +9,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
-      save_dir: "/opt/ml/model"
+      save_dir: /opt/ml/model
       name: null
       version: nsnet2-1.0.0
       log_graph: false
@@ -21,12 +21,12 @@ trainer:
       init_args:
         dirpath: null
         filename: "{epoch}-{train_loss:.5f}"
-        monitor: train_loss
+        monitor: val_mos_ovr
         verbose: false
         save_last: null
         save_top_k: 1
         save_weights_only: false
-        mode: min
+        mode: max
         auto_insert_metric_name: true
         every_n_train_steps: null
         train_time_interval: null
@@ -69,9 +69,16 @@ trainer:
   sync_batchnorm: false
   reload_dataloaders_every_n_epochs: 0
   default_root_dir: null
+model:
+  sampling_rate: 16000
+  n_fft: 512
+  win_length: 512
+  hop_length: 128
+  p835_model_path: mos/p835.onnx
+  p808_model_path: mos/p808.onnx
 data:
   data_dir: /opt/ml/input/data
-  sampling_rate: 48000
+  sampling_rate: 16000
   n_fft: 512
   win_length: 512
   hop_length: 128

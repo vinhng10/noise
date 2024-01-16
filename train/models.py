@@ -1,14 +1,18 @@
 import abc
 import numbers
-from typing import Dict, Optional, Tuple
+import librosa
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning.pytorch as pl
+import onnxruntime as ort
+import numpy as np
+import pandas as pd
+
+from typing import Tuple
 from torch.nn import *
 from torch import Tensor
-from torch.distributions import Normal
 from torch.nn.modules.normalization import _shape_t
 from lightning.pytorch.utilities import grad_norm
 from tqdm import tqdm
@@ -95,9 +99,7 @@ class ReeoLayerNorm(nn.Module):
 ###############################################################################
 # Model Definition
 class Model(pl.LightningModule, metaclass=abc.ABCMeta):
-    @abc.abstractmethod
-    def _shared_step(self, batch, phase: str) -> Dict[str, Tensor]:
-        pass
+    SUPPORTED_SAMPLING_RATE = 16000
 
     @staticmethod
     def _get_prefix(phase: str) -> str:
@@ -109,6 +111,18 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
             raise ValueError(
                 f"Expect phase is either train, val, or test. Got {phase} instead."
             )
+
+    def __init__(
+        self,
+        sampling_rate: int,
+        n_fft: int,
+        win_length: int,
+        hop_length: int,
+        p835_model_path: str,
+        p808_model_path: str,
+    ) -> None:
+        super().__init__()
+        self.mos = MOS(p835_model_path, p808_model_path)
 
     def _replace(self, module):
         for name, child in module.named_children():
@@ -140,15 +154,62 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
                 setattr(module, name, nn.Dropout(child.p, inplace=self.hparams.inplace))
             elif list(child.named_children()):
                 self._replace(child)
-    
+
+    def score(self, batch):
+        noisy_audios, _ = batch
+        filters = self.forward(noisy_audios)
+        enhanced_audios = torch.sqrt(torch.pow(10, noisy_audios * filters)).numpy()
+
+        scores = []
+        for audio in enhanced_audios.transpose((1, 2, 0)):
+            audio = librosa.istft(
+                audio,
+                n_fft=self.hparams.n_fft,
+                win_length=self.hparams.win_length,
+                hop_length=self.hparams.hop_length,
+            )
+            if self.hparams.sampling_rate != Model.SUPPORTED_SAMPLING_RATE:
+                print(
+                    "Only sampling rate of 16000 is supported as of now so resampling audio"
+                )
+                audio = librosa.core.resample(
+                    audio,
+                    self.hparams.sampling_rate,
+                    Model.SUPPORTED_SAMPLING_RATE,
+                )
+            scores.append(self.mos(audio, Model.SUPPORTED_SAMPLING_RATE))
+
+        scores = pd.DataFrame(scores).mean()
+        return scores
+
     def training_step(self, batch, batch_idx):
-        return self._shared_step(batch, "train")
+        noisy_audios, clean_audios = batch
+        filters = self.forward(noisy_audios)
+        enhanced_audios = noisy_audios * filters
+        loss = F.mse_loss(enhanced_audios, clean_audios)
+        self.log(
+            f"train_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        return loss
 
     def validation_step(self, batch, batch_idx):
-        return self._shared_step(batch, "val")
-
-    def test_step(self, batch, batch_idx):
-        return self._shared_step(batch, "test")
+        scores = self.score(batch)
+        self.log_dict(
+            {
+                "val_mos_sig": scores["SIG"],
+                "val_mos_bak": scores["BAK"],
+                "val_mos_ovr": scores["OVRL"],
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
 
     def on_before_zero_grad(self, optimizer):
         # Compute the 2-norm for each layer
@@ -158,15 +219,15 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
 
 
 class NSNET2(Model):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.save_hyperparameters()
-        self.ff1 = nn.Linear(255, 400)
+        self.ff1 = nn.Linear(257, 400)
         self.gru = nn.GRU(400, 400, 2)
         self.ff2 = nn.Linear(400, 600)
         self.ff3 = nn.Linear(600, 600)
-        self.ff4 = nn.Linear(600, 255)
-    
+        self.ff4 = nn.Linear(600, 257)
+
     def forward(self, inputs: Tensor) -> Tensor:
         outputs = F.relu(self.ff1(inputs))
         outputs, _ = self.gru(outputs)
@@ -175,20 +236,94 @@ class NSNET2(Model):
         outputs = F.relu(self.ff4(outputs))
         return outputs
 
-    def _shared_step(self, batch, phase: str) -> Dict[str, Tensor]:
-        noisy_audios, clean_audios = batch
-        filters = self.forward(noisy_audios)
-        filtered_audios = noisy_audios * filters
-        loss = F.mse_loss(filtered_audios, clean_audios)
-        self.log(
-            f"{phase}_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
+
+###############################################################################
+class MOS:
+    INPUT_LENGTH = 9.01
+
+    def __init__(self, p835_model_path, p808_model_path) -> None:
+        self.onnx_sess = ort.InferenceSession(p835_model_path)
+        self.p808_onnx_sess = ort.InferenceSession(p808_model_path)
+
+    def audio_melspec(
+        self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True
+    ):
+        mel_spec = librosa.feature.melspectrogram(
+            y=audio, sr=sr, n_fft=frame_size + 1, hop_length=hop_length, n_mels=n_mels
         )
-        return loss
+        if to_db:
+            mel_spec = (librosa.power_to_db(mel_spec, ref=np.max) + 40) / 40
+        return mel_spec.T
+
+    def get_polyfit_val(self, sig, bak, ovr):
+        p_ovr = np.poly1d([-0.06766283, 1.11546468, 0.04602535])
+        p_sig = np.poly1d([-0.08397278, 1.22083953, 0.0052439])
+        p_bak = np.poly1d([-0.13166888, 1.60915514, -0.39604546])
+
+        sig_poly = p_sig(sig)
+        bak_poly = p_bak(bak)
+        ovr_poly = p_ovr(ovr)
+
+        return sig_poly, bak_poly, ovr_poly
+
+    def __call__(self, audio, sampling_rate):
+        actual_audio_len = len(audio)
+        len_samples = int(MOS.INPUT_LENGTH * sampling_rate)
+        while len(audio) < len_samples:
+            audio = np.append(audio, audio)
+
+        num_hops = int(np.floor(len(audio) / sampling_rate) - MOS.INPUT_LENGTH) + 1
+        hop_len_samples = sampling_rate
+        predicted_mos_sig_seg_raw = []
+        predicted_mos_bak_seg_raw = []
+        predicted_mos_ovr_seg_raw = []
+        predicted_mos_sig_seg = []
+        predicted_mos_bak_seg = []
+        predicted_mos_ovr_seg = []
+        predicted_p808_mos = []
+
+        for idx in range(num_hops):
+            audio_seg = audio[
+                int(idx * hop_len_samples) : int(
+                    (idx + MOS.INPUT_LENGTH) * hop_len_samples
+                )
+            ]
+            if len(audio_seg) < len_samples:
+                continue
+
+            input_features = np.array(audio_seg).astype("float32")[np.newaxis, :]
+            p808_input_features = np.array(
+                self.audio_melspec(audio=audio_seg[:-160])
+            ).astype("float32")[np.newaxis, :, :]
+            oi = {"input_1": input_features}
+            p808_oi = {"input_1": p808_input_features}
+            p808_mos = self.p808_onnx_sess.run(None, p808_oi)[0][0][0]
+            mos_sig_raw, mos_bak_raw, mos_ovr_raw = self.onnx_sess.run(None, oi)[0][0]
+            mos_sig, mos_bak, mos_ovr = self.get_polyfit_val(
+                mos_sig_raw, mos_bak_raw, mos_ovr_raw
+            )
+            predicted_mos_sig_seg_raw.append(mos_sig_raw)
+            predicted_mos_bak_seg_raw.append(mos_bak_raw)
+            predicted_mos_ovr_seg_raw.append(mos_ovr_raw)
+            predicted_mos_sig_seg.append(mos_sig)
+            predicted_mos_bak_seg.append(mos_bak)
+            predicted_mos_ovr_seg.append(mos_ovr)
+            predicted_p808_mos.append(p808_mos)
+
+        clip_dict = {
+            "len_in_sec": actual_audio_len / sampling_rate,
+            "sr": sampling_rate,
+            "num_hops": num_hops,
+            "OVRL_raw": np.mean(predicted_mos_ovr_seg_raw),
+            "SIG_raw": np.mean(predicted_mos_sig_seg_raw),
+            "BAK_raw": np.mean(predicted_mos_bak_seg_raw),
+            "OVRL": np.mean(predicted_mos_ovr_seg),
+            "SIG": np.mean(predicted_mos_sig_seg),
+            "BAK": np.mean(predicted_mos_bak_seg),
+            "P808_MOS": np.mean(predicted_p808_mos),
+        }
+
+        return clip_dict
 
 
 # class ProbVerticalStackReeoModule(Model):

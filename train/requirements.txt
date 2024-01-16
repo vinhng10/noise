@@ -1,8 +1,7 @@
-sagemaker
 librosa
-torch
 lightning
 tqdm
 pyyaml
+onnxruntime
 tensorboard
 jsonargparse[signatures]>=4.26.1

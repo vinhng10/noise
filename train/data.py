@@ -32,6 +32,16 @@ class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
             batch_size=self.hparams.batch_size,
             pin_memory=True,
         )
+    
+    def val_dataloader(self):
+        return DataLoader(
+            self.valset,
+            shuffle=False,
+            collate_fn=self._colllate_fn,
+            num_workers=self.hparams.num_workers,
+            batch_size=self.hparams.batch_size,
+            pin_memory=True,
+        )
 
     @abc.abstractstaticmethod
     def _colllate_fn(batch: List[Tuple[Tensor]]) -> Iterable[Tensor]:
@@ -43,7 +53,7 @@ class NSNET2Dataset(Dataset):
         self,
         split: str,
         data_dir: str,
-        sampling_rate: int = 48000,
+        sampling_rate: int = 16000,
         n_fft: int = 512,
         win_length: int = 512,
         hop_length: int = 128,
@@ -58,12 +68,11 @@ class NSNET2Dataset(Dataset):
         self.hop_length = hop_length
         self.eps = eps
         self.files = []
-        for clean_audio in (self.data_dir / split / "clean").rglob("*.wav"):
-            fileid = clean_audio.stem[6:]
-            noisy_audio = list(
-                (self.data_dir / split / "noisy").glob(f"*{fileid}.wav")
-            )[0]
-            self.files.append((noisy_audio, clean_audio))
+        for noisy_path in (self.data_dir / split / "noisy").rglob("*.wav"):
+            fileid = f'fileid_{noisy_path.stem.split("_")[-1]}'
+            tmp = list((self.data_dir / split / "clean").glob(f"*{fileid}.wav"))
+            clean_path = tmp[0] if len(tmp) > 0 else None
+            self.files.append((noisy_path, clean_path))
 
     def log_power_spectrum(self, audio_path: PathOrStr):
         audio, _ = librosa.load(audio_path, sr=self.sampling_rate)
@@ -72,9 +81,7 @@ class NSNET2Dataset(Dataset):
             n_fft=self.n_fft,
             hop_length=self.hop_length,
             win_length=self.win_length,
-        )[
-            1:-1
-        ]  # Exclude 0th and highest (Nyquist) bins
+        )  # Exclude 0th and highest (Nyquist) bins ???
         audio = np.log10(np.abs(audio) ** 2 + self.eps)
         return audio
 
@@ -84,8 +91,10 @@ class NSNET2Dataset(Dataset):
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
         noisy_audio, clean_audio = self.files[index]
         noisy_audio = torch.from_numpy(self.log_power_spectrum(noisy_audio).T)
-        clean_audio = torch.from_numpy(self.log_power_spectrum(clean_audio).T)
-
+        if clean_audio is not None:
+            clean_audio = torch.from_numpy(self.log_power_spectrum(clean_audio).T)
+        else:
+            clean_audio = torch.empty_like(noisy_audio)
         return noisy_audio, clean_audio
 
 
@@ -129,12 +138,15 @@ class NSNET2DataModule(DataModule):
                 self.hparams.eps,
             )
 
-        #     self.valset = ReeoDataset(
-        #         "val",
-        #         self.hparams.cache_path,
-        #         self.hparams.sequence_length,
-        #         self.hparams.step,
-        #     )
+            self.valset = NSNET2Dataset(
+                "val",
+                self.hparams.data_dir,
+                self.hparams.sampling_rate,
+                self.hparams.n_fft,
+                self.hparams.win_length,
+                self.hparams.hop_length,
+                self.hparams.eps,
+            )
 
         # elif stage == "validate":
         #     self.valset = ReeoDataset(
