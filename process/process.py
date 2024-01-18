@@ -125,7 +125,9 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             sys.stderr.write("WARNING: Cannot read file: %s\n" % source_files[idx])
             continue
         if fs_input != fs_output:
-            input_audio = librosa.resample(input_audio, fs_input, fs_output)
+            input_audio = librosa.resample(
+                input_audio, orig_sr=fs_input, target_sr=fs_output
+            )
 
         # if current file is longer than remaining desired length, and this is
         # noise generation or this is training set, subsample it randomly
@@ -550,6 +552,8 @@ def download_and_extract(names: List[str], category: str):
     data_dir.mkdir(parents=True, exist_ok=True)
 
     for name in names:
+        print("=============================")
+        print(f"Extracting {name}")
         whole_file = download_dir / f"{name}.tgz"
         parts = sorted(list(download_dir.rglob(f"*{name}*")))
         with open(whole_file, "wb") as file:

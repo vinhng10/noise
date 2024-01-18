@@ -1,4 +1,5 @@
 import abc
+import os
 import numbers
 import librosa
 
@@ -10,6 +11,7 @@ import onnxruntime as ort
 import numpy as np
 import pandas as pd
 
+from pathlib import Path
 from typing import Tuple
 from torch.nn import *
 from torch import Tensor
@@ -123,6 +125,7 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
     ) -> None:
         super().__init__()
         self.mos = MOS(p835_model_path, p808_model_path)
+        self.scaler = None
 
     def _replace(self, module):
         for name, child in module.named_children():
@@ -156,9 +159,17 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
                 self._replace(child)
 
     def score(self, batch):
+        if self.scaler is None:
+            self.scaler = np.load(
+                Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy", allow_pickle=True
+            ).item()
         noisy_audios, _ = batch
         filters = self.forward(noisy_audios)
-        enhanced_audios = torch.sqrt(torch.pow(10, noisy_audios * filters)).numpy()
+        enhanced_audios = (noisy_audios * filters).cpu().numpy()
+        enhanced_audios = self.scaler.inverse_transform(
+            enhanced_audios.reshape(-1, enhanced_audios.shape[-1])
+        ).reshape(enhanced_audios.shape)
+        enhanced_audios = np.sqrt(np.power(enhanced_audios, 10))
 
         scores = []
         for audio in enhanced_audios.transpose((1, 2, 0)):

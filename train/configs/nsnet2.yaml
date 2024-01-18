@@ -9,7 +9,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
-      save_dir: /opt/ml/model
+      save_dir: /opt/ml/model/logs
       name: null
       version: nsnet2-1.0.0
       log_graph: false
@@ -98,15 +98,15 @@ optimizer:
   capturable: false
   differentiable: false
   fused: null
-lr_scheduler:
-  monitor: val_mos_ovr
-  mode: max
-  factor: 0.5
-  patience: 10
-  threshold: 1e-4
-  threshold_mode: rel
-  cooldown: 0
-  min_lr: 1e-6
-  eps: 1.0e-08
-  verbose: false
+# lr_scheduler:
+#   monitor: val_mos_ovr
+#   mode: max
+#   factor: 0.5
+#   patience: 10
+#   threshold: 1e-4
+#   threshold_mode: rel
+#   cooldown: 0
+#   min_lr: 1e-6
+#   eps: 1.0e-08
+#   verbose: false
 ckpt_path: null

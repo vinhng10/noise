@@ -1,12 +1,13 @@
 import abc
-from pathlib import Path
-from typing import List, TypeVar, Tuple, Iterable
-
-import librosa
+import os
 import torch
+import librosa
 import warnings
 import numpy as np
 import lightning.pytorch as pl
+from pathlib import Path
+from typing import List, TypeVar, Tuple, Iterable
+from sklearn.discriminant_analysis import StandardScaler
 from tqdm import tqdm
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
@@ -15,13 +16,49 @@ warnings.filterwarnings("ignore", category=np.ComplexWarning)
 T = TypeVar("T")
 PathOrStr = Path | str
 
+
 ################################################################################
+
+
+def log_power_spectrum(
+    audio_path: PathOrStr,
+    sampling_rate: int,
+    n_fft: int,
+    hop_length: int,
+    win_length: int,
+    eps: float,
+) -> np.ndarray:
+    audio, _ = librosa.load(audio_path, sr=sampling_rate)
+    audio = librosa.stft(
+        audio,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+    )  # Exclude 0th and highest (Nyquist) bins ???
+    audio = np.log10(np.abs(audio) ** 2 + eps)
+    return audio.T
 
 
 class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
     def prepare_data(self):
         """Data operation to perform only on main process."""
-        pass
+        save_file = Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy"
+        if not save_file.exists():
+            scaler = StandardScaler()
+            for noisy_path in (Path(self.hparams.data_dir) / "train" / "noisy").rglob(
+                "*.wav"
+            ):
+                scaler.partial_fit(
+                    log_power_spectrum(
+                        noisy_path,
+                        self.hparams.sampling_rate,
+                        self.hparams.n_fft,
+                        self.hparams.hop_length,
+                        self.hparams.win_length,
+                        self.hparams.eps,
+                    )
+                )
+            np.save(save_file, scaler)
 
     def train_dataloader(self):
         return DataLoader(
@@ -32,7 +69,7 @@ class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
             batch_size=self.hparams.batch_size,
             pin_memory=True,
         )
-    
+
     def val_dataloader(self):
         return DataLoader(
             self.valset,
@@ -74,27 +111,47 @@ class NSNET2Dataset(Dataset):
             clean_path = tmp[0] if len(tmp) > 0 else None
             self.files.append((noisy_path, clean_path))
 
-    def log_power_spectrum(self, audio_path: PathOrStr):
-        audio, _ = librosa.load(audio_path, sr=self.sampling_rate)
-        audio = librosa.stft(
-            audio,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-        )  # Exclude 0th and highest (Nyquist) bins ???
-        audio = np.log10(np.abs(audio) ** 2 + self.eps)
-        return audio
+        self.scaler = np.load(
+            Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy", allow_pickle=True
+        ).item()
+
+    def standardize(self, audio: np.ndarray) -> np.ndarray:
+        # Some frequency spectra have spiky value => clip within (-5, 5):
+        return self.scaler.transform(audio).clip(-5, 5)
 
     def __len__(self) -> int:
         return len(self.files)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
-        noisy_audio, clean_audio = self.files[index]
-        noisy_audio = torch.from_numpy(self.log_power_spectrum(noisy_audio).T)
-        if clean_audio is not None:
-            clean_audio = torch.from_numpy(self.log_power_spectrum(clean_audio).T)
+        noisy_path, clean_path = self.files[index]
+        noisy_audio = torch.from_numpy(
+            self.standardize(
+                log_power_spectrum(
+                    noisy_path,
+                    self.sampling_rate,
+                    self.n_fft,
+                    self.hop_length,
+                    self.win_length,
+                    self.eps,
+                )
+            )
+        )
+        if self.split == "train":
+            clean_audio = torch.from_numpy(
+                self.standardize(
+                    log_power_spectrum(
+                        clean_path,
+                        self.sampling_rate,
+                        self.n_fft,
+                        self.hop_length,
+                        self.win_length,
+                        self.eps,
+                    )
+                )
+            )
         else:
             clean_audio = torch.empty_like(noisy_audio)
+
         return noisy_audio, clean_audio
 
 
