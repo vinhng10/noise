@@ -561,9 +561,13 @@ def download_and_extract(names: List[str], category: str):
                 with open(part, "rb") as part_file:
                     shutil.copyfileobj(part_file, file)
                 part.unlink()
-        with tarfile.open(whole_file, "r") as tar:
-            tar.extractall(data_dir)
-        whole_file.unlink()
+        try:
+            with tarfile.open(whole_file, "r") as tar:
+                tar.extractall(data_dir)
+        except Exception as e:
+            print(e)
+        finally:
+            whole_file.unlink()
 
 
 if __name__ == "__main__":
