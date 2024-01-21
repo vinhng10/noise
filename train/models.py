@@ -2,6 +2,7 @@ import abc
 import os
 import numbers
 import librosa
+from sklearn.discriminant_analysis import StandardScaler
 
 import torch
 import torch.nn as nn
@@ -18,6 +19,8 @@ from torch import Tensor
 from torch.nn.modules.normalization import _shape_t
 from lightning.pytorch.utilities import grad_norm
 from tqdm import tqdm
+
+from train.data import standardize, log_power_spectrum
 
 ###############################################################################
 # Layer Definition
@@ -124,7 +127,6 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
         p808_model_path: str,
     ) -> None:
         super().__init__()
-        self.mos = MOS(p835_model_path, p808_model_path)
         self.scaler = None
 
     def _replace(self, module):
@@ -163,6 +165,7 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
             self.scaler = np.load(
                 Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy", allow_pickle=True
             ).item()
+        mos = MOS(self.hparams.p835_model_path, self.hparams.p808_model_path)
         noisy_audios, _ = batch
         filters = self.forward(noisy_audios)
         enhanced_audios = (noisy_audios * filters).cpu().numpy()
@@ -188,7 +191,7 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
                     self.hparams.sampling_rate,
                     Model.SUPPORTED_SAMPLING_RATE,
                 )
-            scores.append(self.mos(audio, Model.SUPPORTED_SAMPLING_RATE))
+            scores.append(mos(audio, Model.SUPPORTED_SAMPLING_RATE))
 
         scores = pd.DataFrame(scores).mean()
         return scores
@@ -246,6 +249,36 @@ class NSNET2(Model):
         outputs = F.relu(self.ff3(outputs))
         outputs = F.relu(self.ff4(outputs))
         return outputs
+
+    def enhance(self, path: str, scaler: StandardScaler) -> Tensor:
+        audio = (
+            torch.from_numpy(
+                standardize(
+                    log_power_spectrum(
+                        path,
+                        self.hparams.sampling_rate,
+                        self.hparams.n_fft,
+                        self.hparams.hop_length,
+                        self.hparams.win_length,
+                        1.0e-08,
+                    ),
+                    scaler,
+                )
+            )
+            .unsqueeze(1)
+            .to(self.device)
+        )
+        filter = self.forward(audio)
+        output = (audio * filter).squeeze().cpu().numpy()
+        output = scaler.inverse_transform(output)
+        output = np.sqrt(np.power(output, 10))
+        output = librosa.istft(
+            output.T,
+            n_fft=self.hparams.n_fft,
+            win_length=self.hparams.win_length,
+            hop_length=self.hparams.hop_length,
+        )
+        return output
 
 
 ###############################################################################

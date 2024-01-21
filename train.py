@@ -14,6 +14,7 @@ if __name__ == "__main__":
         instance_type="ml.g4dn.xlarge",
         instance_count=1,
         volume_size_in_gb=100,
+        max_run=48 * 60 * 60,
         framework_version="2.1",
         py_version="py310",
         source_dir="train",

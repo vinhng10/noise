@@ -20,6 +20,11 @@ PathOrStr = Path | str
 ################################################################################
 
 
+def standardize(audio: np.ndarray, scaler: StandardScaler) -> np.ndarray:
+    # Some frequency spectra have spiky value => clip within (-5, 5):
+    return scaler.transform(audio).clip(-5, 5)
+
+
 def log_power_spectrum(
     audio_path: PathOrStr,
     sampling_rate: int,
@@ -115,17 +120,13 @@ class NSNET2Dataset(Dataset):
             Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy", allow_pickle=True
         ).item()
 
-    def standardize(self, audio: np.ndarray) -> np.ndarray:
-        # Some frequency spectra have spiky value => clip within (-5, 5):
-        return self.scaler.transform(audio).clip(-5, 5)
-
     def __len__(self) -> int:
         return len(self.files)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
         noisy_path, clean_path = self.files[index]
         noisy_audio = torch.from_numpy(
-            self.standardize(
+            standardize(
                 log_power_spectrum(
                     noisy_path,
                     self.sampling_rate,
@@ -133,12 +134,13 @@ class NSNET2Dataset(Dataset):
                     self.hop_length,
                     self.win_length,
                     self.eps,
-                )
+                ),
+                self.scaler,
             )
         )
         if self.split == "train":
             clean_audio = torch.from_numpy(
-                self.standardize(
+                standardize(
                     log_power_spectrum(
                         clean_path,
                         self.sampling_rate,
@@ -146,7 +148,8 @@ class NSNET2Dataset(Dataset):
                         self.hop_length,
                         self.win_length,
                         self.eps,
-                    )
+                    ),
+                    self.scaler,
                 )
             )
         else:
