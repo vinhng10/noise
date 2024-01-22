@@ -20,7 +20,7 @@ from torch.nn.modules.normalization import _shape_t
 from lightning.pytorch.utilities import grad_norm
 from tqdm import tqdm
 
-from train.data import standardize, log_power_spectrum
+from data import standardize, log_power_spectrum
 
 ###############################################################################
 # Layer Definition

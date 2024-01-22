@@ -11,6 +11,7 @@ if __name__ == "__main__":
         instance_type="ml.m5.xlarge",
         instance_count=1,
         volume_size_in_gb=1024,
+        max_runtime_in_seconds=24 * 60 * 60,
     )
 
     processor.run(
