@@ -20,7 +20,7 @@ from torch.nn.modules.normalization import _shape_t
 from lightning.pytorch.utilities import grad_norm
 from tqdm import tqdm
 
-from data import standardize, log_power_spectrum
+from data import inverse_log_power_spectrum, log_power_spectrum
 
 ###############################################################################
 # Layer Definition
@@ -127,7 +127,6 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
         p808_model_path: str,
     ) -> None:
         super().__init__()
-        self.scaler = None
 
     def _replace(self, module):
         for name, child in module.named_children():
@@ -161,46 +160,36 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
                 self._replace(child)
 
     def score(self, batch):
-        if self.scaler is None:
-            self.scaler = np.load(
-                Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy", allow_pickle=True
-            ).item()
+        scaler = np.load(
+            Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy", allow_pickle=True
+        ).item()
         mos = MOS(self.hparams.p835_model_path, self.hparams.p808_model_path)
-        noisy_audios, _ = batch
-        filters = self.forward(noisy_audios)
-        enhanced_audios = (noisy_audios * filters).cpu().numpy()
-        enhanced_audios = self.scaler.inverse_transform(
-            enhanced_audios.reshape(-1, enhanced_audios.shape[-1])
-        ).reshape(enhanced_audios.shape)
-        enhanced_audios = np.sqrt(np.power(enhanced_audios, 10))
+        noisy_spectrograms, noisy_angles, _, _ = batch
+        filters = self.forward(noisy_spectrograms)
+        enhanced_spectrograms = noisy_spectrograms * filters
+        enhanced_spectrograms = enhanced_spectrograms.cpu().numpy().transpose(1, 0, 2)
+        noisy_angles = noisy_angles.cpu().numpy().transpose(1, 0, 2)
 
         scores = []
-        for audio in enhanced_audios.transpose((1, 2, 0)):
-            audio = librosa.istft(
-                audio,
-                n_fft=self.hparams.n_fft,
-                win_length=self.hparams.win_length,
-                hop_length=self.hparams.hop_length,
+        for spectrogram, angle in zip(enhanced_spectrograms, noisy_angles):
+            audio = inverse_log_power_spectrum(
+                spectrogram,
+                angle,
+                self.hparams.n_fft,
+                self.hparams.hop_length,
+                self.hparams.win_length,
+                scaler,
             )
-            if self.hparams.sampling_rate != Model.SUPPORTED_SAMPLING_RATE:
-                print(
-                    "Only sampling rate of 16000 is supported as of now so resampling audio"
-                )
-                audio = librosa.core.resample(
-                    audio,
-                    self.hparams.sampling_rate,
-                    Model.SUPPORTED_SAMPLING_RATE,
-                )
             scores.append(mos(audio, Model.SUPPORTED_SAMPLING_RATE))
 
         scores = pd.DataFrame(scores).mean()
         return scores
 
     def training_step(self, batch, batch_idx):
-        noisy_audios, clean_audios = batch
-        filters = self.forward(noisy_audios)
-        enhanced_audios = noisy_audios * filters
-        loss = F.mse_loss(enhanced_audios, clean_audios)
+        noisy_spectrograms, _, clean_spectrograms, _ = batch
+        filters = self.forward(noisy_spectrograms)
+        enhanced_spectrograms = noisy_spectrograms * filters
+        loss = F.mse_loss(enhanced_spectrograms, clean_spectrograms)
         self.log(
             f"train_loss",
             loss,
@@ -251,34 +240,30 @@ class NSNET2(Model):
         return outputs
 
     def enhance(self, path: str, scaler: StandardScaler) -> Tensor:
-        audio = (
-            torch.from_numpy(
-                standardize(
-                    log_power_spectrum(
-                        path,
-                        self.hparams.sampling_rate,
-                        self.hparams.n_fft,
-                        self.hparams.hop_length,
-                        self.hparams.win_length,
-                        1.0e-08,
-                    ),
-                    scaler,
-                )
-            )
-            .unsqueeze(1)
-            .to(self.device)
+        noisy_spectrogram, noisy_angle, _, _ = log_power_spectrum(
+            path,
+            self.hparams.sampling_rate,
+            self.hparams.n_fft,
+            self.hparams.hop_length,
+            self.hparams.win_length,
+            1e-8,
+            scaler,
         )
-        filter = self.forward(audio)
-        output = (audio * filter).squeeze().cpu().numpy()
-        output = scaler.inverse_transform(output)
-        output = np.sqrt(np.power(output, 10))
-        output = librosa.istft(
-            output.T,
-            n_fft=self.hparams.n_fft,
-            win_length=self.hparams.win_length,
-            hop_length=self.hparams.hop_length,
+        noisy_spectrogram = (
+            torch.from_numpy(noisy_spectrogram).unsqueeze(1).to(self.device)
         )
-        return output
+        filters = self.forward(noisy_spectrogram)
+        enhanced_spectrogram = noisy_spectrogram * filters
+        enhanced_spectrogram = enhanced_spectrogram.squeeze().cpu().numpy()
+        audio = inverse_log_power_spectrum(
+            enhanced_spectrogram,
+            noisy_angle,
+            self.n_fft,
+            self.hop_length,
+            self.win_length,
+            scaler,
+        )
+        return audio
 
 
 ###############################################################################

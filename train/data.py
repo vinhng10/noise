@@ -6,7 +6,7 @@ import warnings
 import numpy as np
 import lightning.pytorch as pl
 from pathlib import Path
-from typing import List, TypeVar, Tuple, Iterable
+from typing import Dict, List, TypeVar, Tuple, Iterable
 from sklearn.discriminant_analysis import StandardScaler
 from tqdm import tqdm
 from torch import Tensor
@@ -20,11 +20,6 @@ PathOrStr = Path | str
 ################################################################################
 
 
-def standardize(audio: np.ndarray, scaler: StandardScaler) -> np.ndarray:
-    # Some frequency spectra have spiky value => clip within (-5, 5):
-    return scaler.transform(audio).clip(-5, 5)
-
-
 def log_power_spectrum(
     audio_path: PathOrStr,
     sampling_rate: int,
@@ -32,16 +27,41 @@ def log_power_spectrum(
     hop_length: int,
     win_length: int,
     eps: float,
-) -> np.ndarray:
+    scaler: StandardScaler | None = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     audio, _ = librosa.load(audio_path, sr=sampling_rate)
-    audio = librosa.stft(
+    stft = librosa.stft(
         audio,
         n_fft=n_fft,
         hop_length=hop_length,
         win_length=win_length,
     )  # Exclude 0th and highest (Nyquist) bins ???
-    audio = np.log10(np.abs(audio) ** 2 + eps)
-    return audio.T
+    spectrogram = np.log10(np.abs(stft) ** 2 + eps).T
+    # Some frequency spectra have spiky value => clip within (-5, 5):
+    if scaler is not None:
+        spectrogram = scaler.transform(spectrogram).clip(-5, 5)
+    angle = np.angle(stft)
+    return spectrogram, angle
+
+
+def inverse_log_power_spectrum(
+    spectrogram: np.ndarray,
+    angle: np.ndarray,
+    n_fft: int,
+    hop_length: int,
+    win_length: int,
+    scaler: StandardScaler | None = None,
+) -> np.ndarray:
+    if scaler is not None:
+        spectrogram = scaler.inverse_transform(spectrogram)
+    magnitude = np.sqrt(10**spectrogram).T
+    audio = librosa.istft(
+        magnitude * np.exp(angle * 1j),
+        n_fft=n_fft,
+        win_length=win_length,
+        hop_length=hop_length,
+    )
+    return audio
 
 
 class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
@@ -53,16 +73,15 @@ class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
             for noisy_path in (Path(self.hparams.data_dir) / "train" / "noisy").rglob(
                 "*.wav"
             ):
-                scaler.partial_fit(
-                    log_power_spectrum(
-                        noisy_path,
-                        self.hparams.sampling_rate,
-                        self.hparams.n_fft,
-                        self.hparams.hop_length,
-                        self.hparams.win_length,
-                        self.hparams.eps,
-                    )
+                spectrogram, _ = log_power_spectrum(
+                    noisy_path,
+                    self.hparams.sampling_rate,
+                    self.hparams.n_fft,
+                    self.hparams.hop_length,
+                    self.hparams.win_length,
+                    self.hparams.eps,
                 )
+                scaler.partial_fit(spectrogram)
             np.save(save_file, scaler)
 
     def train_dataloader(self):
@@ -123,47 +142,57 @@ class NSNET2Dataset(Dataset):
     def __len__(self) -> int:
         return len(self.files)
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
+    def __getitem__(self, index: int) -> Dict[str, Tensor]:
         noisy_path, clean_path = self.files[index]
-        noisy_audio = torch.from_numpy(
-            standardize(
-                log_power_spectrum(
-                    noisy_path,
-                    self.sampling_rate,
-                    self.n_fft,
-                    self.hop_length,
-                    self.win_length,
-                    self.eps,
-                ),
+
+        noisy_spectrogram, noisy_angle = log_power_spectrum(
+            noisy_path,
+            self.sampling_rate,
+            self.n_fft,
+            self.hop_length,
+            self.win_length,
+            self.eps,
+            self.scaler,
+        )
+        noisy_spectrogram = torch.from_numpy(noisy_spectrogram)
+        noisy_angle = torch.from_numpy(noisy_angle)
+
+        if self.split == "train":
+            clean_spectrogram, clean_angle = log_power_spectrum(
+                clean_path,
+                self.sampling_rate,
+                self.n_fft,
+                self.hop_length,
+                self.win_length,
+                self.eps,
                 self.scaler,
             )
-        )
-        if self.split == "train":
-            clean_audio = torch.from_numpy(
-                standardize(
-                    log_power_spectrum(
-                        clean_path,
-                        self.sampling_rate,
-                        self.n_fft,
-                        self.hop_length,
-                        self.win_length,
-                        self.eps,
-                    ),
-                    self.scaler,
-                )
-            )
+            clean_spectrogram = torch.from_numpy(clean_spectrogram)
+            clean_angle = torch.from_numpy(clean_angle)
         else:
-            clean_audio = torch.empty_like(noisy_audio)
+            clean_spectrogram = torch.empty_like(noisy_spectrogram)
+            clean_angle = torch.empty_like(noisy_angle)
 
-        return noisy_audio, clean_audio
+        return {
+            "noisy_spectrogram": noisy_spectrogram,
+            "noisy_angle": noisy_angle,
+            "clean_spectrogram": clean_spectrogram,
+            "clean_angle": clean_angle,
+        }
 
 
 class NSNET2DataModule(DataModule):
     @staticmethod
-    def _colllate_fn(batch: List[Tuple[Tensor]]) -> Iterable[Tensor]:
-        noisy_audios = torch.stack([sample[0] for sample in batch], dim=1)
-        clean_audios = torch.stack([sample[1] for sample in batch], dim=1)
-        return noisy_audios, clean_audios
+    def _colllate_fn(batch: List[Dict[str, Tensor]]) -> Iterable[Tensor]:
+        noisy_spectrograms = torch.stack(
+            [sample["noisy_spectrogram"] for sample in batch], dim=1
+        )
+        noisy_angles = torch.stack([sample["noisy_angle"] for sample in batch], dim=1)
+        clean_spectrograms = torch.stack(
+            [sample["clean_spectrogram"] for sample in batch], dim=1
+        )
+        clean_angles = torch.stack([sample["clean_angle"] for sample in batch], dim=1)
+        return noisy_spectrograms, noisy_angles, clean_spectrograms, clean_angles
 
     def __init__(
         self,

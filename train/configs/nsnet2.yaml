@@ -86,7 +86,7 @@ data:
   num_workers: 2
   batch_size: 256
 optimizer:
-  lr: 1e-4
+  lr: 1e-3
   betas:
   - 0.9
   - 0.999
