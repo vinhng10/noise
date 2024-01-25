@@ -92,6 +92,7 @@ class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
             num_workers=self.hparams.num_workers,
             batch_size=self.hparams.batch_size,
             pin_memory=True,
+            persistent_workers=True,
         )
 
     def val_dataloader(self):
@@ -102,6 +103,7 @@ class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
             num_workers=self.hparams.num_workers,
             batch_size=self.hparams.batch_size,
             pin_memory=True,
+            persistent_workers=True,
         )
 
     @abc.abstractstaticmethod

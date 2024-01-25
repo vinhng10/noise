@@ -225,22 +225,18 @@ class NSNET2(Model):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.save_hyperparameters()
-        self.ff1 = nn.Linear(257, 400)
-        self.gru = nn.GRU(400, 400, 2)
-        self.ff2 = nn.Linear(400, 600)
-        self.ff3 = nn.Linear(600, 600)
-        self.ff4 = nn.Linear(600, 257)
+        self.ff1 = nn.Linear(257, 512)
+        self.gru = nn.GRU(512, 512, 1)
+        self.ff2 = nn.Linear(512, 257)
 
     def forward(self, inputs: Tensor) -> Tensor:
         outputs = F.relu(self.ff1(inputs))
         outputs, _ = self.gru(outputs)
-        outputs = F.relu(self.ff2(outputs))
-        outputs = F.relu(self.ff3(outputs))
-        outputs = F.relu(self.ff4(outputs))
+        outputs = self.ff2(outputs)
         return outputs
 
     def enhance(self, path: str, scaler: StandardScaler) -> Tensor:
-        noisy_spectrogram, noisy_angle, _, _ = log_power_spectrum(
+        noisy_spectrogram, noisy_angle = log_power_spectrum(
             path,
             self.hparams.sampling_rate,
             self.hparams.n_fft,
@@ -258,9 +254,9 @@ class NSNET2(Model):
         audio = inverse_log_power_spectrum(
             enhanced_spectrogram,
             noisy_angle,
-            self.n_fft,
-            self.hop_length,
-            self.win_length,
+            self.hparams.n_fft,
+            self.hparams.hop_length,
+            self.hparams.win_length,
             scaler,
         )
         return audio
