@@ -5,7 +5,7 @@ trainer:
   strategy: auto
   devices: auto
   num_nodes: 1
-  precision: null
+  precision: 16-mixed
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
@@ -38,7 +38,7 @@ trainer:
         logging_interval: "epoch"
         log_momentum: false
   fast_dev_run: false
-  max_epochs: 1000
+  max_epochs: 10000
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -49,13 +49,13 @@ trainer:
   limit_predict_batches: null
   overfit_batches: 0.0
   val_check_interval: null
-  check_val_every_n_epoch: 5
+  check_val_every_n_epoch: 10
   num_sanity_val_steps: null
   log_every_n_steps: null
   enable_checkpointing: null
   enable_progress_bar: null
   enable_model_summary: null
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 1
   gradient_clip_val: null
   gradient_clip_algorithm: null
   deterministic: null
@@ -83,8 +83,8 @@ data:
   win_length: 512
   hop_length: 128
   eps: 1.0e-08
-  num_workers: 2
-  batch_size: 256
+  num_workers: 8
+  batch_size: 512
 optimizer:
   lr: 1e-3
   betas:

@@ -67,8 +67,10 @@ def inverse_log_power_spectrum(
 class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
     def prepare_data(self):
         """Data operation to perform only on main process."""
+        scaler_path = Path("/opt/ml/input/data/mos/scaler.npy")
         save_file = Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy"
-        if not save_file.exists():
+        if not scaler_path.exists():
+            print("==> Compute new scaler")
             scaler = StandardScaler()
             for noisy_path in (Path(self.hparams.data_dir) / "train" / "noisy").rglob(
                 "*.wav"
@@ -83,6 +85,9 @@ class DataModule(pl.LightningDataModule, metaclass=abc.ABCMeta):
                 )
                 scaler.partial_fit(spectrogram)
             np.save(save_file, scaler)
+        else:
+            print("==> Use precomputed scaler")
+            scaler_path.rename(save_file)
 
     def train_dataloader(self):
         return DataLoader(
