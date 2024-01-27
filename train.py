@@ -11,7 +11,7 @@ if __name__ == "__main__":
         output_path="s3://db-noise/artifacts",
         code_location="s3://db-noise/artifacts",
         sagemaker_session=sess,
-        instance_type="ml.g4dn.2xlarge",
+        instance_type="ml.g4dn.xlarge",
         instance_count=1,
         volume_size_in_gb=100,
         max_run=48 * 60 * 60,

@@ -5,13 +5,13 @@ trainer:
   strategy: auto
   devices: auto
   num_nodes: 1
-  precision: 16-mixed
+  precision: null
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: /opt/ml/model/logs
       name: null
-      version: nsnet2-1.0.0
+      version: nsnet2-2.0.0
       log_graph: false
       default_hp_metric: true
       prefix: ''
@@ -23,7 +23,7 @@ trainer:
         filename: "{epoch}-{train_loss:.3f}-{val_mos_ovr:.3f}"
         monitor: val_mos_ovr
         verbose: false
-        save_last: null
+        save_last: true
         save_top_k: 10
         save_weights_only: false
         mode: max
@@ -70,21 +70,17 @@ trainer:
   reload_dataloaders_every_n_epochs: 0
   default_root_dir: null
 model:
-  sampling_rate: 16000
   n_fft: 512
   win_length: 512
   hop_length: 128
   p835_model_path: /opt/ml/input/data/mos/p835.onnx
   p808_model_path: /opt/ml/input/data/mos/p808.onnx
+  global_stats_path: /opt/ml/input/data/mos/scaler.npy
 data:
   data_dir: /opt/ml/input/data
   sampling_rate: 16000
-  n_fft: 512
-  win_length: 512
-  hop_length: 128
-  eps: 1.0e-08
-  num_workers: 8
-  batch_size: 512
+  num_workers: 4
+  batch_size: 256
 optimizer:
   lr: 1e-3
   betas:

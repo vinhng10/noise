@@ -1,4 +1,3 @@
-import os
 import sys
 import torch
 from lightning.pytorch.cli import LightningCLI, ReduceLROnPlateau
