@@ -1,8 +1,6 @@
-import abc
-import os
 import numbers
+from os import PathLike
 import librosa
-from sklearn.discriminant_analysis import StandardScaler
 
 import torch
 import torch.nn as nn
@@ -12,20 +10,16 @@ import onnxruntime as ort
 import numpy as np
 import pandas as pd
 
-from pathlib import Path
-from typing import Tuple
+from typing import Callable, Tuple
 from torch.nn import *
 from torch import Tensor
+from torchaudio.transforms import Spectrogram, InverseSpectrogram
 from torch.nn.modules.normalization import _shape_t
 from lightning.pytorch.utilities import grad_norm
-from tqdm import tqdm
 
-from data import inverse_log_power_spectrum, log_power_spectrum
 
 ###############################################################################
 # Layer Definition
-
-
 class MonteCarloDropout(nn.Dropout):
     def forward(self, input: Tensor) -> Tensor:
         return F.dropout(input, self.p, True, self.inplace)
@@ -102,29 +96,54 @@ class ReeoLayerNorm(nn.Module):
 
 
 ###############################################################################
-# Model Definition
-class Model(pl.LightningModule, metaclass=abc.ABCMeta):
-    SUPPORTED_SAMPLING_RATE = 16000
+# Transformation Definition
+class FunctionalModule(nn.Module):
+    def __init__(self, functional: Callable[[Tensor], Tensor]) -> None:
+        super().__init__()
+        self.functional = functional
 
-    @staticmethod
-    def _get_prefix(phase: str) -> str:
-        if phase == "train":
-            return ""
-        elif phase == "val" or phase == "test":
-            return phase + "_"
-        else:
-            raise ValueError(
-                f"Expect phase is either train, val, or test. Got {phase} instead."
-            )
+    def forward(self, inputs: Tensor) -> Tensor:
+        return self.functional(inputs)
+
+
+class GlobalStatsNormalization(nn.Module):
+    def __init__(self, global_stats_path: str | PathLike) -> None:
+        super().__init__()
+        scaler = np.load(global_stats_path, allow_pickle=True).item()
+        self.register_buffer("mean", torch.FloatTensor(scaler.mean_).reshape(1, 1, -1))
+        self.register_buffer(
+            "inverse_std",
+            1 / (torch.FloatTensor(scaler.scale_).reshape(1, 1, -1) + 1e-8),
+        )
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        return (inputs - self.mean) * self.inverse_std
+
+
+class InverseGlobalStatsNormalization(nn.Module):
+    def __init__(self, global_stats_path: str | PathLike) -> None:
+        super().__init__()
+        scaler = np.load(global_stats_path, allow_pickle=True).item()
+        self.register_buffer("mean", torch.FloatTensor(scaler.mean_).reshape(1, 1, -1))
+        self.register_buffer("std", torch.FloatTensor(scaler.scale_).reshape(1, 1, -1))
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        return inputs * self.std + self.mean
+
+
+###############################################################################
+# Model Definition
+class Model(pl.LightningModule):
+    SUPPORTED_SAMPLING_RATE = 16000
 
     def __init__(
         self,
-        sampling_rate: int,
         n_fft: int,
         win_length: int,
         hop_length: int,
         p835_model_path: str,
         p808_model_path: str,
+        global_stats_path: str,
     ) -> None:
         super().__init__()
 
@@ -159,36 +178,10 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
             elif list(child.named_children()):
                 self._replace(child)
 
-    def score(self, batch):
-        scaler = np.load(
-            Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy", allow_pickle=True
-        ).item()
-        mos = MOS(self.hparams.p835_model_path, self.hparams.p808_model_path)
-        noisy_spectrograms, noisy_angles, _, _ = batch
-        filters = self.forward(noisy_spectrograms)
-        enhanced_spectrograms = noisy_spectrograms * filters
-        enhanced_spectrograms = enhanced_spectrograms.cpu().numpy().transpose(1, 0, 2)
-        noisy_angles = noisy_angles.cpu().numpy().transpose(1, 0, 2)
-
-        scores = []
-        for spectrogram, angle in zip(enhanced_spectrograms, noisy_angles):
-            audio = inverse_log_power_spectrum(
-                spectrogram,
-                angle,
-                self.hparams.n_fft,
-                self.hparams.hop_length,
-                self.hparams.win_length,
-                scaler,
-            )
-            scores.append(mos(audio, Model.SUPPORTED_SAMPLING_RATE))
-
-        scores = pd.DataFrame(scores).mean()
-        return scores
-
     def training_step(self, batch, batch_idx):
-        noisy_spectrograms, _, clean_spectrograms, _ = batch
-        filters = self.forward(noisy_spectrograms)
-        enhanced_spectrograms = noisy_spectrograms * filters
+        noisy_waveforms, clean_waveforms = batch
+        clean_spectrograms, _ = self.transform(clean_waveforms)
+        enhanced_spectrograms, _ = self.filter(noisy_waveforms)
         loss = F.mse_loss(enhanced_spectrograms, clean_spectrograms)
         self.log(
             f"train_loss",
@@ -201,7 +194,13 @@ class Model(pl.LightningModule, metaclass=abc.ABCMeta):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        scores = self.score(batch)
+        mos = MOS(self.hparams.p835_model_path, self.hparams.p808_model_path)
+        noisy_waveforms, _ = batch
+        enhanced_waveforms = self.forward(noisy_waveforms)
+        scores = []
+        for waveform in enhanced_waveforms.cpu().numpy():
+            scores.append(mos(waveform, Model.SUPPORTED_SAMPLING_RATE))
+        scores = pd.DataFrame(scores).mean()
         self.log_dict(
             {
                 "val_mos_sig": scores["SIG"],
@@ -225,41 +224,56 @@ class NSNET2(Model):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.save_hyperparameters()
+        self.stft = Spectrogram(
+            n_fft=self.hparams.n_fft,
+            win_length=self.hparams.win_length,
+            hop_length=self.hparams.hop_length,
+            power=None,
+        )
+        self.scaled_log_spectrogram = nn.Sequential(
+            FunctionalModule(lambda x: (x.abs().pow(2) + 1e-8).log10()),
+            FunctionalModule(lambda x: x.permute(2, 0, 1)),
+            GlobalStatsNormalization(self.hparams.global_stats_path),
+        )
+        self.inverse_stft = InverseSpectrogram(
+            n_fft=self.hparams.n_fft,
+            win_length=self.hparams.win_length,
+            hop_length=self.hparams.hop_length,
+        )
+        self.inverse_scaled_log_spectrogram = nn.Sequential(
+            InverseGlobalStatsNormalization(self.hparams.global_stats_path),
+            FunctionalModule(lambda x: x.permute(1, 2, 0)),
+            FunctionalModule(lambda x: (10**x).sqrt()),
+        )
         self.ff1 = nn.Linear(257, 512)
         self.gru = nn.GRU(512, 512, 1)
         self.ff2 = nn.Linear(512, 257)
 
-    def forward(self, inputs: Tensor) -> Tensor:
-        outputs = F.relu(self.ff1(inputs))
-        outputs, _ = self.gru(outputs)
-        outputs = self.ff2(outputs)
-        return outputs
+    def forward(self, waveforms: Tensor) -> Tensor:
+        spectrograms, angles = self.filter(waveforms)
+        waveforms = self.inverse_transform(spectrograms, angles)
+        return waveforms
 
-    def enhance(self, path: str, scaler: StandardScaler) -> Tensor:
-        noisy_spectrogram, noisy_angle = log_power_spectrum(
-            path,
-            self.hparams.sampling_rate,
-            self.hparams.n_fft,
-            self.hparams.hop_length,
-            self.hparams.win_length,
-            1e-8,
-            scaler,
-        )
-        noisy_spectrogram = (
-            torch.from_numpy(noisy_spectrogram).unsqueeze(1).to(self.device)
-        )
-        filters = self.forward(noisy_spectrogram)
-        enhanced_spectrogram = noisy_spectrogram * filters
-        enhanced_spectrogram = enhanced_spectrogram.squeeze().cpu().numpy()
-        audio = inverse_log_power_spectrum(
-            enhanced_spectrogram,
-            noisy_angle,
-            self.hparams.n_fft,
-            self.hparams.hop_length,
-            self.hparams.win_length,
-            scaler,
-        )
-        return audio
+    def filter(self, waveforms: Tensor) -> tuple[Tensor, Tensor]:
+        spectrograms, angles = self.transform(waveforms)
+        filters = F.relu(self.ff1(spectrograms))
+        filters, _ = self.gru(filters)
+        filters = self.ff2(filters)
+        spectrograms = spectrograms * filters
+        return spectrograms, angles
+
+    def transform(self, waveforms: Tensor) -> tuple[Tensor, Tensor]:
+        stfts = self.stft(waveforms)
+        angles = stfts.angle()
+        scaled_log_spectrograms = self.scaled_log_spectrogram(stfts)
+        return scaled_log_spectrograms, angles
+
+    def inverse_transform(
+        self, scaled_log_spectrograms: Tensor, angles: Tensor
+    ) -> Tensor:
+        stfts = self.inverse_scaled_log_spectrogram(scaled_log_spectrograms)
+        waveforms = self.inverse_stft(stfts * (angles * 1j).exp())
+        return waveforms
 
 
 ###############################################################################
