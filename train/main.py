@@ -14,8 +14,8 @@ class CLI(LightningCLI):
 
 def cli_main():
     cli = CLI(
-        NSNET2,
-        NSNET2DataModule,
+        ConvNet,
+        SpectralDataModule,
         save_config_kwargs={"overwrite": True},
         parser_kwargs={"parser_mode": "yaml"},
     )

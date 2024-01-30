@@ -30,7 +30,7 @@ class Transform:
         return waveform
 
 
-class NSNET2DataModule(pl.LightningDataModule):
+class SpectralDataModule(pl.LightningDataModule):
     @staticmethod
     def _colllate_fn(batch: List[Dict[str, Tensor]]) -> Iterable[Tensor]:
         noisy_waveforms = torch.stack([sample["noisy_waveform"] for sample in batch])
@@ -96,8 +96,8 @@ class NSNET2DataModule(pl.LightningDataModule):
             _description_
         """
         if stage == "fit":
-            self.trainset = NSNET2Dataset(self.train_files, self.train_transforms)
-            self.valset = NSNET2Dataset(self.val_files, self.val_transforms)
+            self.trainset = SpectralDataset(self.train_files, self.train_transforms)
+            self.valset = SpectralDataset(self.val_files, self.val_transforms)
 
         else:
             raise ValueError(f"Stage {stage} is not supported.")
@@ -125,7 +125,7 @@ class NSNET2DataModule(pl.LightningDataModule):
         )
 
 
-class NSNET2Dataset(Dataset):
+class SpectralDataset(Dataset):
     def __init__(self, files: list[tuple[Path, Path | None]], transform: Transform):
         super().__init__()
         self.files = files
