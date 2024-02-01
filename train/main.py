@@ -26,6 +26,6 @@ if __name__ == "__main__":
         "main.py",
         "fit",
         "--config",
-        "configs/nsnet2.yaml",
+        "configs/convnet.yaml",
     ]
     cli_main()

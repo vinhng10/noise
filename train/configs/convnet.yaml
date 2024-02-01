@@ -11,7 +11,7 @@ trainer:
     init_args:
       save_dir: /opt/ml/model/logs
       name: null
-      version: convnet-1.0.0
+      version: convnet-1.1.0
       log_graph: false
       default_hp_metric: true
       prefix: ''
@@ -70,6 +70,8 @@ trainer:
   reload_dataloaders_every_n_epochs: 0
   default_root_dir: null
 model:
+  base_n_filters: 16
+  bias: true
   n_fft: 512
   win_length: 512
   hop_length: 128

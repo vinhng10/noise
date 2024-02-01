@@ -272,28 +272,35 @@ class NSNET2(Model):
 
 
 class ConvNet(Model):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, base_n_filters: int, bias: bool, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.save_hyperparameters()
         self.net = nn.Sequential(
-            nn.Conv2d(1, 2, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(2),
+            nn.Conv2d(1, base_n_filters, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
-            nn.Conv2d(2, 4, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(4),
+
+            nn.Conv2d(base_n_filters, base_n_filters * 2, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters * 2),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
-            nn.Conv2d(4, 8, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(8),
+
+            nn.Conv2d(base_n_filters * 2, base_n_filters * 4, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters * 4),
             nn.ReLU(inplace=True),
+
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
-            nn.Conv2d(8, 4, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(4),
+            nn.Conv2d(base_n_filters * 4, base_n_filters * 2, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters * 2),
             nn.ReLU(inplace=True),
-            nn.Upsample(size=(376, 257), mode="bilinear", align_corners=True),
+
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(base_n_filters * 2, base_n_filters, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters),
+            nn.ReLU(inplace=True),
         )
-        self.output = nn.Conv2d(4, 1, 3, 1, 1, bias=False)
+        self.output = nn.Conv2d(base_n_filters, 1, 3, 1, 1, bias=bias)
 
     def forward(self, waveforms: Tensor) -> Tensor:
         spectrograms, angles = self.filter(waveforms)
