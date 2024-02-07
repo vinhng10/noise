@@ -290,12 +290,12 @@ class ConvNet(Model):
             nn.BatchNorm2d(base_n_filters * 4),
             nn.ReLU(inplace=True),
 
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(base_n_filters * 4, base_n_filters * 2, 3, 1, 1, bias=bias),
             nn.BatchNorm2d(base_n_filters * 2),
             nn.ReLU(inplace=True),
 
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(base_n_filters * 2, base_n_filters, 3, 1, 1, bias=bias),
             nn.BatchNorm2d(base_n_filters),
             nn.ReLU(inplace=True),
@@ -314,8 +314,7 @@ class ConvNet(Model):
         filters = F.interpolate(
             filters,
             size=(n_samples, n_frequencies),
-            mode="bilinear",
-            align_corners=True,
+            mode="nearest",
         )
         filters = self.output(filters)
         spectrograms = spectrograms * filters.squeeze(1).permute(1, 0, 2)

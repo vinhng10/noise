@@ -1,4 +1,3 @@
-import sys
 import torch
 from lightning.pytorch.cli import LightningCLI, ReduceLROnPlateau
 
@@ -22,10 +21,4 @@ def cli_main():
 
 
 if __name__ == "__main__":
-    sys.argv = [
-        "main.py",
-        "fit",
-        "--config",
-        "configs/convnet.yaml",
-    ]
     cli_main()
