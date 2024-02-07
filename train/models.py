@@ -146,6 +146,22 @@ class Model(pl.LightningModule):
         global_stats_path: str,
     ) -> None:
         super().__init__()
+        self.stft = Spectrogram(
+            n_fft=n_fft, win_length=win_length, hop_length=hop_length, power=None
+        )
+        self.scaled_log_spectrogram = nn.Sequential(
+            FunctionalModule(lambda x: (x.abs().pow(2) + 1e-8).log10()),
+            FunctionalModule(lambda x: x.permute(2, 0, 1)),
+            GlobalStatsNormalization(global_stats_path),
+        )
+        self.inverse_stft = InverseSpectrogram(
+            n_fft=n_fft, win_length=win_length, hop_length=hop_length
+        )
+        self.inverse_scaled_log_spectrogram = nn.Sequential(
+            InverseGlobalStatsNormalization(global_stats_path),
+            FunctionalModule(lambda x: x.permute(1, 2, 0)),
+            FunctionalModule(lambda x: (10**x).sqrt()),
+        )
 
     def _replace(self, module):
         for name, child in module.named_children():
@@ -219,32 +235,24 @@ class Model(pl.LightningModule):
         norms = grad_norm(self, norm_type=2)
         self.log_dict(norms, on_step=False, on_epoch=True, prog_bar=False, logger=True)
 
+    def transform(self, waveforms: Tensor) -> tuple[Tensor, Tensor]:
+        stfts = self.stft(waveforms)
+        angles = stfts.angle()
+        scaled_log_spectrograms = self.scaled_log_spectrogram(stfts)
+        return scaled_log_spectrograms, angles
+
+    def inverse_transform(
+        self, scaled_log_spectrograms: Tensor, angles: Tensor
+    ) -> Tensor:
+        stfts = self.inverse_scaled_log_spectrogram(scaled_log_spectrograms)
+        waveforms = self.inverse_stft(stfts * (angles * 1j).exp())
+        return waveforms
+
 
 class NSNET2(Model):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.save_hyperparameters()
-        self.stft = Spectrogram(
-            n_fft=self.hparams.n_fft,
-            win_length=self.hparams.win_length,
-            hop_length=self.hparams.hop_length,
-            power=None,
-        )
-        self.scaled_log_spectrogram = nn.Sequential(
-            FunctionalModule(lambda x: (x.abs().pow(2) + 1e-8).log10()),
-            FunctionalModule(lambda x: x.permute(2, 0, 1)),
-            GlobalStatsNormalization(self.hparams.global_stats_path),
-        )
-        self.inverse_stft = InverseSpectrogram(
-            n_fft=self.hparams.n_fft,
-            win_length=self.hparams.win_length,
-            hop_length=self.hparams.hop_length,
-        )
-        self.inverse_scaled_log_spectrogram = nn.Sequential(
-            InverseGlobalStatsNormalization(self.hparams.global_stats_path),
-            FunctionalModule(lambda x: x.permute(1, 2, 0)),
-            FunctionalModule(lambda x: (10**x).sqrt()),
-        )
         self.ff1 = nn.Linear(257, 512)
         self.gru = nn.GRU(512, 512, 1)
         self.ff2 = nn.Linear(512, 257)
@@ -262,18 +270,55 @@ class NSNET2(Model):
         spectrograms = spectrograms * filters
         return spectrograms, angles
 
-    def transform(self, waveforms: Tensor) -> tuple[Tensor, Tensor]:
-        stfts = self.stft(waveforms)
-        angles = stfts.angle()
-        scaled_log_spectrograms = self.scaled_log_spectrogram(stfts)
-        return scaled_log_spectrograms, angles
 
-    def inverse_transform(
-        self, scaled_log_spectrograms: Tensor, angles: Tensor
-    ) -> Tensor:
-        stfts = self.inverse_scaled_log_spectrogram(scaled_log_spectrograms)
-        waveforms = self.inverse_stft(stfts * (angles * 1j).exp())
+class ConvNet(Model):
+    def __init__(self, base_n_filters: int, bias: bool, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.save_hyperparameters()
+        self.net = nn.Sequential(
+            nn.Conv2d(1, base_n_filters, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(base_n_filters, base_n_filters * 2, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters * 2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(base_n_filters * 2, base_n_filters * 4, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters * 4),
+            nn.ReLU(inplace=True),
+
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(base_n_filters * 4, base_n_filters * 2, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters * 2),
+            nn.ReLU(inplace=True),
+
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(base_n_filters * 2, base_n_filters, 3, 1, 1, bias=bias),
+            nn.BatchNorm2d(base_n_filters),
+            nn.ReLU(inplace=True),
+        )
+        self.output = nn.Conv2d(base_n_filters, 1, 3, 1, 1, bias=bias)
+
+    def forward(self, waveforms: Tensor) -> Tensor:
+        spectrograms, angles = self.filter(waveforms)
+        waveforms = self.inverse_transform(spectrograms, angles)
         return waveforms
+
+    def filter(self, waveforms: Tensor) -> tuple[Tensor, Tensor]:
+        spectrograms, angles = self.transform(waveforms)
+        n_samples, _, n_frequencies = spectrograms.shape
+        filters = self.net(spectrograms.permute(1, 0, 2).unsqueeze(1))
+        filters = F.interpolate(
+            filters,
+            size=(n_samples, n_frequencies),
+            mode="nearest",
+        )
+        filters = self.output(filters)
+        spectrograms = spectrograms * filters.squeeze(1).permute(1, 0, 2)
+        return spectrograms, angles
 
 
 ###############################################################################
@@ -363,200 +408,3 @@ class MOS:
         }
 
         return clip_dict
-
-
-# class ProbVerticalStackReeoModule(Model):
-#     def __init__(
-#         self,
-#         sequence_length: int,
-#         audio_feature_size: int,
-#         motion_feature_size: int,
-#         hidden_size: int,
-#         num_heads: int,
-#         feedforward_size: int,
-#         dropout: float,
-#         inplace: bool,
-#         activation: str,
-#         num_layers: int,
-#         batch_first: bool,
-#         norm_first: bool,
-#         bias: bool,
-#         step: int,
-#         noise_prob: float,
-#         noise_scale: float,
-#         zero_initial_prob: float,
-#     ) -> None:
-#         super().__init__()
-#         self.save_hyperparameters()
-#         self.pos_embedding = PositionEmbedding(
-#             sequence_length, hidden_size, 0.1, inplace
-#         )
-#         self.linear_emdedding = nn.Linear(
-#             audio_feature_size + motion_feature_size, hidden_size, bias
-#         )
-#         layer = nn.TransformerEncoderLayer(
-#             d_model=hidden_size,
-#             nhead=num_heads,
-#             dim_feedforward=feedforward_size,
-#             dropout=dropout,
-#             activation=activation,
-#             batch_first=batch_first,
-#             norm_first=norm_first,
-#         )
-#         norm = ReeoLayerNorm(hidden_size, bias=bias)
-#         self.transformer = nn.TransformerEncoder(
-#             layer, num_layers=num_layers, norm=norm
-#         )
-#         self._replace(self.transformer)
-#         self.loc = nn.Linear(hidden_size, motion_feature_size * step, bias)
-#         self.log_scale = nn.Linear(hidden_size, motion_feature_size * step, bias)
-#         self.register_buffer(
-#             "target_mask",
-#             torch.triu(
-#                 torch.full((sequence_length, sequence_length), float("-inf")),
-#                 diagonal=1,
-#             ),
-#         )
-
-#     def forward(
-#         self,
-#         motions: Tensor,
-#         audios: Tensor,
-#         src_pad_masks: Tensor = None,
-#     ) -> Tuple[Tensor, Tensor]:
-#         scale = math.sqrt(self.hparams.hidden_size)
-#         inputs = torch.cat((motions, audios), dim=-1)
-#         inputs = self.linear_emdedding(inputs) * scale
-#         inputs = self.pos_embedding(inputs)
-#         outputs = self.transformer(
-#             inputs,
-#             mask=self.target_mask,
-#             src_key_padding_mask=src_pad_masks,
-#             is_causal=True,
-#         )
-#         locs = self.loc(outputs)
-#         log_scales = self.log_scale(outputs)
-#         return locs.real, log_scales.real
-
-#     def _shared_step(self, batch, phase: str) -> Dict[str, Tensor]:
-#         motions, audios = batch
-#         step = self.hparams.step
-#         if torch.rand(1).item() < self.hparams.zero_initial_prob:
-#             motions = motions[step:]
-#             audios = audios[step:]
-#             targets = _torch_stack_targets(motions, step)
-#             if torch.rand(1).item() < self.hparams.noise_prob:
-#                 motions += (
-#                     torch.randn_like(
-#                         motions, dtype=motions.dtype, device=motions.device
-#                     )
-#                     * self.hparams.noise_scale
-#                 )
-#                 motions = F.pad(motions[:-step], (0, 0, 0, 0, step, 0))
-#         else:
-#             targets = _torch_stack_targets_V2(motions, step)
-#             motions = motions[:-step]
-#             audios = audios[step:]
-#             if torch.rand(1).item() < self.hparams.noise_prob:
-#                 motions += (
-#                     torch.randn_like(
-#                         motions, dtype=motions.dtype, device=motions.device
-#                     )
-#                     * self.hparams.noise_scale
-#                 )
-#         locs, log_scales = self.forward(motions, audios)
-#         loss = -Normal(locs, log_scales.exp()).log_prob(targets).mean()
-#         self.log(
-#             f"{phase}_loss",
-#             loss,
-#             on_step=False,
-#             on_epoch=True,
-#             prog_bar=True,
-#             logger=True,
-#         )
-#         return loss
-
-#     def _generate(
-#         self,
-#         motions: Tensor,
-#         audios: Tensor,
-#         loc_coef: float = 1.1,
-#         scale_coef: float = 1.0,
-#         mode: str = "inference",
-#     ) -> Tensor:
-#         step = self.hparams.step
-#         feat_size = self.hparams.motion_feature_size
-#         for i in range(step, len(audios) + step, step):
-#             locs, log_scales = self(motions[:-step], audios)
-#             dists = Normal(locs[i - 1], log_scales[i - 1].exp() * scale_coef)
-#             if mode == "inference":
-#                 predictions = torch.cat(
-#                     (
-#                         locs[i - 1].reshape(step, -1, feat_size)[:, :, :3] / loc_coef,
-#                         dists.sample().reshape(step, -1, feat_size)[:, :, 3:],
-#                     ),
-#                     dim=-1,
-#                 )
-#             else:
-#                 predictions = dists.sample().reshape(step, -1, feat_size)
-#             motions[i : i + step] = predictions
-#         return motions
-
-#     def generate(
-#         self,
-#         audios: Tensor,
-#         loc_coef: float = 1.1,
-#         scale_coef: float = 1.0,
-#         disable_bar: bool = False,
-#     ) -> Tensor:
-#         step = self.hparams.step
-#         sequence_length = self.hparams.sequence_length
-#         feat_size = self.hparams.motion_feature_size
-
-#         pad = sequence_length - (len(audios) % sequence_length)
-
-#         audios = F.pad(audios, (0, 0, 0, 0, 0, pad))
-
-#         motions = torch.zeros(
-#             (step + len(audios), audios.shape[1], feat_size),
-#             device=audios.device,
-#             dtype=audios.dtype,
-#         )
-
-#         for i in tqdm(
-#             range(sequence_length, len(audios) + 1, sequence_length),
-#             disable=disable_bar,
-#         ):
-#             motions[i - sequence_length : i + step] = self._generate(
-#                 motions[i - sequence_length : i + step],
-#                 audios[i - sequence_length : i],
-#                 loc_coef,
-#                 scale_coef,
-#                 "inference",
-#             )
-#         return motions[step:-pad]
-
-#     def log_prob(self, motions: Tensor, audios: Tensor) -> Tensor:
-#         """
-#         Mathematically, the log joint probability of the whole motion sequence
-#         should be the sum of log probability of each features and time step
-#         (probability chain rule). However, the sum easily becomes very large
-#         and make the exponential infinite.
-#         To avoid that, the mean is computed as a scaled down of the log joint
-#         probability of the motion sequence.
-#         """
-#         locs, log_scales = self.forward(
-#             F.pad(motions[: -self.hparams.step], (0, 0, 0, 0, self.hparams.step, 0)),
-#             audios,
-#         )
-#         # Take only the immediate next motion to compute log probability:
-#         log_probs = (
-#             Normal(locs, log_scales.exp())
-#             .log_prob(
-#                 _torch_stack_targets(
-#                     torch.cat((motions, audios), dim=-1), self.hparams.step
-#                 )
-#             )
-#             .mean(dim=(0, 2))
-#         )
-#         return log_probs

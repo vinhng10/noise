@@ -1,4 +1,3 @@
-import sys
 import torch
 from lightning.pytorch.cli import LightningCLI, ReduceLROnPlateau
 
@@ -14,18 +13,12 @@ class CLI(LightningCLI):
 
 def cli_main():
     cli = CLI(
-        NSNET2,
-        NSNET2DataModule,
+        ConvNet,
+        SpectralDataModule,
         save_config_kwargs={"overwrite": True},
         parser_kwargs={"parser_mode": "yaml"},
     )
 
 
 if __name__ == "__main__":
-    sys.argv = [
-        "main.py",
-        "fit",
-        "--config",
-        "configs/nsnet2.yaml",
-    ]
     cli_main()
