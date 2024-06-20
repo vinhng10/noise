@@ -13,7 +13,7 @@ class CLI(LightningCLI):
 
 def cli_main():
     cli = CLI(
-        ConvNet,
+        MultiConvNet,
         SpectralDataModule,
         save_config_kwargs={"overwrite": True},
         parser_kwargs={"parser_mode": "yaml"},

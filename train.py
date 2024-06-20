@@ -4,7 +4,7 @@ from sagemaker.pytorch import PyTorch
 
 
 if __name__ == "__main__":
-    configs_file = "convnet.yaml"
+    configs_file = "multiconvnet.yaml"
 
     with open(f"train/configs/{configs_file}") as f:
         configs = yaml.safe_load(f)
@@ -30,7 +30,7 @@ if __name__ == "__main__":
     )
     estimator.fit(
         {
-            "train": "s3://db-noise/datasets/train",
+            "train": "s3://db-noise/datasets/train-10s-1000",
             "val": "s3://db-noise/datasets/val",
             "mos": "s3://db-noise/mos",
         }
