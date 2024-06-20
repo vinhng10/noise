@@ -365,15 +365,34 @@ class MultiConvNet(Model):
 
     def forward(self, waveforms: Tensor) -> Tensor:
         spectrograms, angles = self.filter(waveforms)
-        waveforms = self.inverse_transform(spectrograms, angles)
+        waveforms = self.inverse_transform(spectrograms[-1], angles)
         return waveforms
 
-    def filter(self, waveforms: Tensor) -> tuple[Tensor, Tensor]:
+    def filter(self, waveforms: Tensor) -> tuple[list[Tensor], Tensor]:
+        spectrograms_list = []
         spectrograms, angles = self.transform(waveforms)
         for net in self.nets:
             filters = net(spectrograms.permute(1, 0, 2).unsqueeze(1))
             spectrograms = spectrograms * filters.squeeze(1).permute(1, 0, 2)
-        return spectrograms, angles
+            spectrograms_list.append(spectrograms)
+        return spectrograms_list, angles
+
+    def training_step(self, batch, batch_idx):
+        noisy_waveforms, clean_waveforms = batch
+        clean_spectrograms, _ = self.transform(clean_waveforms)
+        spectrograms, _ = self.filter(noisy_waveforms)
+        losses = list(
+            map(lambda spec: F.mse_loss(spec, clean_spectrograms), spectrograms)
+        )
+        loss = sum(losses)
+        self.log_dict(
+            {"layer_0_loss": losses[0], "layer_1_loss": losses[1], "train_loss": loss},
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        return loss
 
 
 ###############################################################################
