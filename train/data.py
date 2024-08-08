@@ -24,9 +24,9 @@ class Transform:
         self.sampling_rate = sampling_rate
 
     def __call__(self, path: str | PathLike) -> tuple[Tensor, int]:
-        waveform, orig_sr = torchaudio.load(path)
+        waveform, orig_sr = torchaudio.load(str(path))
         waveform = torchaudio.functional.resample(waveform, orig_sr, self.sampling_rate)
-        waveform = torch.mean(waveform, dim=0)
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
         return waveform
 
 
