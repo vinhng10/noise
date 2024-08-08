@@ -198,7 +198,7 @@ class Model(pl.LightningModule):
         noisy_waveforms, clean_waveforms = batch
         clean_spectrograms, _ = self.transform(clean_waveforms)
         enhanced_spectrograms, _ = self.filter(noisy_waveforms)
-        loss = F.mse_loss(enhanced_spectrograms, clean_spectrograms)
+        loss = F.l1_loss(enhanced_spectrograms, clean_spectrograms)
         self.log(
             f"train_loss",
             loss,
@@ -280,21 +280,17 @@ class ConvNet(Model):
             nn.BatchNorm2d(base_n_filters),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
-
             nn.Conv2d(base_n_filters, base_n_filters * 2, 3, 1, 1, bias=bias),
             nn.BatchNorm2d(base_n_filters * 2),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
-
             nn.Conv2d(base_n_filters * 2, base_n_filters * 4, 3, 1, 1, bias=bias),
             nn.BatchNorm2d(base_n_filters * 4),
             nn.ReLU(inplace=True),
-
             nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(base_n_filters * 4, base_n_filters * 2, 3, 1, 1, bias=bias),
             nn.BatchNorm2d(base_n_filters * 2),
             nn.ReLU(inplace=True),
-
             nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(base_n_filters * 2, base_n_filters, 3, 1, 1, bias=bias),
             nn.BatchNorm2d(base_n_filters),
@@ -319,6 +315,84 @@ class ConvNet(Model):
         filters = self.output(filters)
         spectrograms = spectrograms * filters.squeeze(1).permute(1, 0, 2)
         return spectrograms, angles
+
+
+class MultiConvNet(Model):
+    def __init__(
+        self, base_n_filters: int, bias: bool, n_frames: int, *args, **kwargs
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.save_hyperparameters()
+
+        self.nets = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(1, base_n_filters, 3, 1, 1, bias=bias),
+                    nn.BatchNorm2d(base_n_filters),
+                    nn.ReLU(inplace=True),
+                    nn.MaxPool2d(2),
+                    nn.Conv2d(base_n_filters, base_n_filters * 2, 3, 1, 1, bias=bias),
+                    nn.BatchNorm2d(base_n_filters * 2),
+                    nn.ReLU(inplace=True),
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(base_n_filters * 2, base_n_filters, 3, 1, 1, bias=bias),
+                    nn.BatchNorm2d(base_n_filters),
+                    nn.ReLU(inplace=True),
+                    nn.Upsample(
+                        size=(n_frames, kwargs["n_fft"] // 2 + 1), mode="nearest"
+                    ),
+                    nn.Conv2d(base_n_filters, 1, 3, 1, 1, bias=bias),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(1, base_n_filters, 3, 1, 1, bias=bias),
+                    nn.BatchNorm2d(base_n_filters),
+                    nn.ReLU(inplace=True),
+                    nn.MaxPool2d(2),
+                    nn.Conv2d(base_n_filters, base_n_filters * 2, 3, 1, 1, bias=bias),
+                    nn.BatchNorm2d(base_n_filters * 2),
+                    nn.ReLU(inplace=True),
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(base_n_filters * 2, base_n_filters, 3, 1, 1, bias=bias),
+                    nn.BatchNorm2d(base_n_filters),
+                    nn.ReLU(inplace=True),
+                    nn.Upsample(
+                        size=(n_frames, kwargs["n_fft"] // 2 + 1), mode="nearest"
+                    ),
+                    nn.Conv2d(base_n_filters, 1, 3, 1, 1, bias=bias),
+                ),
+            ]
+        )
+
+    def forward(self, waveforms: Tensor) -> Tensor:
+        spectrograms, angles = self.filter(waveforms)
+        waveforms = self.inverse_transform(spectrograms[-1], angles)
+        return waveforms
+
+    def filter(self, waveforms: Tensor) -> tuple[list[Tensor], Tensor]:
+        spectrograms_list = []
+        spectrograms, angles = self.transform(waveforms)
+        for net in self.nets:
+            filters = net(spectrograms.permute(1, 0, 2).unsqueeze(1))
+            spectrograms = spectrograms * filters.squeeze(1).permute(1, 0, 2)
+            spectrograms_list.append(spectrograms)
+        return spectrograms_list, angles
+
+    def training_step(self, batch, batch_idx):
+        noisy_waveforms, clean_waveforms = batch
+        clean_spectrograms, _ = self.transform(clean_waveforms)
+        spectrograms, _ = self.filter(noisy_waveforms)
+        losses = list(
+            map(lambda spec: F.mse_loss(spec, clean_spectrograms), spectrograms)
+        )
+        loss = sum(losses)
+        self.log_dict(
+            {"layer_0_loss": losses[0], "layer_1_loss": losses[1], "train_loss": loss},
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        return loss
 
 
 ###############################################################################
