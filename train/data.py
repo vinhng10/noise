@@ -30,12 +30,7 @@ class Transform:
         return waveform
 
 
-class SpectralDataModule(pl.LightningDataModule):
-    @staticmethod
-    def _colllate_fn(batch: List[Dict[str, Tensor]]) -> Iterable[Tensor]:
-        noisy_waveforms = torch.stack([sample["noisy_waveform"] for sample in batch])
-        clean_waveforms = torch.stack([sample["clean_waveform"] for sample in batch])
-        return noisy_waveforms, clean_waveforms
+class NoiseDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
@@ -96,8 +91,8 @@ class SpectralDataModule(pl.LightningDataModule):
             _description_
         """
         if stage == "fit":
-            self.trainset = SpectralDataset(self.train_files, self.train_transforms)
-            self.valset = SpectralDataset(self.val_files, self.val_transforms)
+            self.trainset = NoiseDataset(self.train_files, self.train_transforms)
+            self.valset = NoiseDataset(self.val_files, self.val_transforms)
 
         else:
             raise ValueError(f"Stage {stage} is not supported.")
@@ -106,7 +101,6 @@ class SpectralDataModule(pl.LightningDataModule):
         return DataLoader(
             self.trainset,
             shuffle=True,
-            collate_fn=self._colllate_fn,
             num_workers=self.hparams.num_workers,
             batch_size=self.hparams.batch_size,
             pin_memory=True,
@@ -117,7 +111,6 @@ class SpectralDataModule(pl.LightningDataModule):
         return DataLoader(
             self.valset,
             shuffle=False,
-            collate_fn=self._colllate_fn,
             num_workers=self.hparams.num_workers,
             batch_size=self.hparams.batch_size,
             pin_memory=True,
@@ -125,7 +118,7 @@ class SpectralDataModule(pl.LightningDataModule):
         )
 
 
-class SpectralDataset(Dataset):
+class NoiseDataset(Dataset):
     def __init__(self, files: list[tuple[Path, Path | None]], transform: Transform):
         super().__init__()
         self.files = files
@@ -143,7 +136,4 @@ class SpectralDataset(Dataset):
         else:
             clean_waveform = torch.empty_like(noisy_waveform)
 
-        return {
-            "noisy_waveform": noisy_waveform,
-            "clean_waveform": clean_waveform,
-        }
+        return noisy_waveform, clean_waveform
