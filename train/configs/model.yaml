@@ -71,7 +71,10 @@ fit:
     reload_dataloaders_every_n_epochs: 0
     default_root_dir: null
   model:
-    n_filters: 16
+    in_channels: 1
+    hidden_channels: 16
+    out_channels: 1
+    encoder_n_layers: 4
     mr_stft_lambda: 0.5
     fft_sizes: [512, 1024, 2048]
     hop_lengths: [50, 120, 240]

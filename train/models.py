@@ -12,7 +12,10 @@ class Model(pl.LightningModule):
 
     def __init__(
         self,
-        n_filters: int,
+        in_channels: int,
+        hidden_channels: int,
+        out_channels: int,
+        encoder_n_layers: int,
         mr_stft_lambda: float,
         fft_sizes: List[int],
         hop_lengths: List[int],
@@ -20,32 +23,105 @@ class Model(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.blocks = nn.ModuleList(
-            [
+        # encoder and decoder
+        self.encoder = nn.ModuleList()
+        self.decoder = nn.ModuleList()
+
+        for i in range(encoder_n_layers):
+            self.encoder.append(
                 nn.Sequential(
-                    nn.Conv1d(1, n_filters, 3, 1, 1),
-                    nn.BatchNorm1d(n_filters),
+                    nn.Conv1d(
+                        in_channels, hidden_channels, kernel_size=3, stride=2, padding=1
+                    ),
                     nn.ReLU(),
-                ),
-                nn.Sequential(
-                    nn.Conv1d(n_filters, n_filters * 2, 3, 1, 1),
-                    nn.BatchNorm1d(n_filters * 2),
-                    nn.ReLU(),
-                ),
-                nn.Sequential(
-                    nn.Conv1d(n_filters * 2, n_filters, 3, 1, 1),
-                    nn.BatchNorm1d(n_filters),
-                    nn.ReLU(),
-                ),
-                nn.Conv1d(n_filters, 1, 3, 1, 1),
-            ]
-        )
+                    nn.Conv1d(hidden_channels, hidden_channels * 2, 1),
+                    nn.GLU(dim=1),
+                )
+            )
+            in_channels = hidden_channels
+
+            if i == 0:
+                # no relu at end
+                self.decoder.append(
+                    nn.Sequential(
+                        nn.Conv1d(hidden_channels, hidden_channels * 2, 1),
+                        nn.GLU(dim=1),
+                        nn.ConvTranspose1d(
+                            hidden_channels,
+                            out_channels,
+                            kernel_size=3,
+                            stride=2,
+                            padding=1,
+                            output_padding=1,
+                        ),
+                    )
+                )
+            else:
+                self.decoder.insert(
+                    0,
+                    nn.Sequential(
+                        nn.Conv1d(hidden_channels, hidden_channels * 2, 1),
+                        nn.GLU(dim=1),
+                        nn.ConvTranspose1d(
+                            hidden_channels,
+                            out_channels,
+                            kernel_size=3,
+                            stride=2,
+                            padding=1,
+                            output_padding=1,
+                        ),
+                        nn.ReLU(),
+                    ),
+                )
+            out_channels = hidden_channels
+
+        # self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """
+        weight rescaling initialization from https://arxiv.org/abs/1911.13254
+        """
+        if isinstance(module, (nn.Conv1d, nn.ConvTranspose1d)):
+            w = module.weight.detach()
+            alpha = 10.0 * w.std()
+            module.weight.data /= torch.sqrt(alpha)
+            module.bias.data /= torch.sqrt(alpha)
 
     def forward(self, waveforms):
-        outputs = waveforms
-        for block in self.blocks:
-            outputs = block(outputs)
-        return outputs
+        B, C, L = waveforms.shape
+        assert C == 1
+
+        # normalization and padding
+        std = waveforms.std(dim=2, keepdim=True) + 1e-3
+        x = waveforms / std
+
+        # encoder
+        skip_connections = []
+        for downsampling_block in self.encoder:
+            x = downsampling_block(x)
+            skip_connections.append(x)
+        skip_connections = skip_connections[::-1]
+
+        # # attention mask for causal inference; for non-causal, set attn_mask to None
+        # len_s = x.shape[-1]  # length at bottleneck
+        # attn_mask = (
+        #     1 - torch.triu(torch.ones((1, len_s, len_s), device=x.device), diagonal=1)
+        # ).bool()
+
+        # x = self.tsfm_conv1(x)  # C 1024 -> 512
+        # x = x.permute(0, 2, 1)
+        # x = self.tsfm_encoder(x, src_mask=attn_mask)
+        # x = x.permute(0, 2, 1)
+        # x = self.tsfm_conv2(x)  # C 512 -> 1024
+
+        # decoder
+        for i, upsampling_block in enumerate(self.decoder):
+            skip_i = skip_connections[i]
+            x += skip_i[:, :, : x.shape[-1]]
+            x = upsampling_block(x)
+
+        x = x * std
+        return x
 
     def training_step(self, batch, batch_idx):
         noisy_waveforms, clean_waveforms = batch
@@ -56,7 +132,11 @@ class Model(pl.LightningModule):
         )
         loss = l1_loss + mrstft_loss
         self.log_dict(
-            {"train_loss": loss, "train_l1_loss": l1_loss, "train_mrstft_loss": mrstft_loss},
+            {
+                "train_loss": loss,
+                "train_l1_loss": l1_loss,
+                "train_mrstft_loss": mrstft_loss,
+            },
             on_step=False,
             on_epoch=True,
             prog_bar=True,
@@ -64,7 +144,7 @@ class Model(pl.LightningModule):
         )
         return loss
 
-    def _stft_mag(self, input, fft_size, hop_length, win_length):
+    def stft_mag(self, input, fft_size, hop_length, win_length):
         x_stft = torch.stft(
             input,
             fft_size,
@@ -84,10 +164,10 @@ class Model(pl.LightningModule):
             self.hparams.hop_lengths,
             self.hparams.win_lengths,
         ):
-            x_mag = self._stft_mag(
+            x_mag = self.stft_mag(
                 x.view(-1, x.shape[2]), fft_size, hop_length, win_length
             )
-            y_mag = self._stft_mag(
+            y_mag = self.stft_mag(
                 y.view(-1, x.shape[2]), fft_size, hop_length, win_length
             )
 
