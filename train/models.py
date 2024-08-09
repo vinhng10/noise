@@ -56,7 +56,7 @@ class Model(pl.LightningModule):
         )
         loss = l1_loss + mrstft_loss
         self.log_dict(
-            {"loss": loss, "l1_loss": l1_loss, "mrstft_loss": mrstft_loss},
+            {"train_loss": loss, "train_l1_loss": l1_loss, "train_mrstft_loss": mrstft_loss},
             on_step=False,
             on_epoch=True,
             prog_bar=True,
