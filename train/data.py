@@ -93,7 +93,8 @@ class NoiseDataModule(pl.LightningDataModule):
         if stage == "fit":
             self.trainset = NoiseDataset(self.train_files, self.train_transforms)
             self.valset = NoiseDataset(self.val_files, self.val_transforms)
-
+        elif stage == "predict":
+            self.valset = NoiseDataset(self.val_files, self.val_transforms)
         else:
             raise ValueError(f"Stage {stage} is not supported.")
 
