@@ -72,6 +72,10 @@ fit:
     default_root_dir: null
   model:
     n_filters: 16
+    mr_stft_lambda: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_lengths: [50, 120, 240]
+    win_lengths: [240, 600, 1200]
   data:
     data_dir: ./data-debug
     sampling_rate: 16000
