@@ -16,6 +16,7 @@ class Model(pl.LightningModule):
         hidden_channels: int,
         out_channels: int,
         encoder_n_layers: int,
+        embed_size: int,
         mr_stft_lambda: float,
         fft_sizes: List[int],
         hop_lengths: List[int],
@@ -23,6 +24,23 @@ class Model(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
+        self.embedding = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=(1, embed_size),
+            stride=(1, embed_size),
+            padding=(0, 0),
+        )
+
+        self.inv_embedding = nn.ConvTranspose2d(
+            out_channels,
+            out_channels,
+            kernel_size=(1, embed_size),
+            stride=(1, embed_size),
+            padding=(0, 0),
+            output_padding=(0, 0),
+        )
+
         # encoder and decoder
         self.encoder = nn.ModuleList()
         self.decoder = nn.ModuleList()
@@ -33,50 +51,29 @@ class Model(pl.LightningModule):
                     nn.Conv2d(
                         in_channels,
                         hidden_channels,
-                        kernel_size=(1, 4),
-                        stride=(1, 4),
+                        kernel_size=(1, 3),
+                        stride=(1, 2),
                         padding=(0, 1),
                     ),
                     nn.ReLU(),
-                    # nn.Conv2d(hidden_channels, hidden_channels, 1),
-                    # nn.ReLU(),
                 )
             )
             in_channels = hidden_channels
 
-            if i == 0:
-                # no relu at end
-                self.decoder.append(
-                    nn.Sequential(
-                        # nn.Conv2d(hidden_channels, hidden_channels, 1),
-                        # nn.ReLU(),
-                        nn.ConvTranspose2d(
-                            hidden_channels,
-                            out_channels,
-                            kernel_size=(1, 4),
-                            stride=(1, 4),
-                            padding=(0, 1),
-                            output_padding=(0, 2),
-                        ),
-                    )
-                )
-            else:
-                self.decoder.insert(
-                    0,
-                    nn.Sequential(
-                        #     nn.Conv2d(hidden_channels, hidden_channels, 1),
-                        #     nn.ReLU(),
-                        nn.ConvTranspose2d(
-                            hidden_channels,
-                            out_channels,
-                            kernel_size=(1, 4),
-                            stride=(1, 4),
-                            padding=(0, 1),
-                            output_padding=(0, 2),
-                        ),
-                        nn.ReLU(),
+            self.decoder.insert(
+                0,
+                nn.Sequential(
+                    nn.ConvTranspose2d(
+                        hidden_channels,
+                        out_channels,
+                        kernel_size=(1, 3),
+                        stride=(1, 2),
+                        padding=(0, 1),
+                        output_padding=(0, 1),
                     ),
-                )
+                    nn.ReLU(),
+                ),
+            )
             out_channels = hidden_channels
 
         # self.apply(self._init_weights)
@@ -96,6 +93,8 @@ class Model(pl.LightningModule):
         std = waveforms.std(dim=-1, keepdim=True) + 1e-3
         x = waveforms / std
 
+        x = self.embedding(x)
+
         # encoder
         skip_connections = []
         for downsampling_block in self.encoder:
@@ -108,6 +107,8 @@ class Model(pl.LightningModule):
             skip_i = skip_connections[i]
             x = x + skip_i[:, :, : x.shape[-1]]
             x = upsampling_block(x)
+
+        x = self.inv_embedding(x)
 
         x = x * std
         return x
