@@ -20,14 +20,29 @@ PathOrStr = Path | str
 
 
 class Transform:
-    def __init__(self, sampling_rate: int) -> None:
+    def __init__(self, sampling_rate: int, length: int) -> None:
         self.sampling_rate = sampling_rate
+        self.length = length
 
-    def __call__(self, path: str | PathLike) -> tuple[Tensor, int]:
-        waveform, orig_sr = torchaudio.load(str(path))
-        waveform = torchaudio.functional.resample(waveform, orig_sr, self.sampling_rate)
-        waveform = torch.mean(waveform, dim=0, keepdim=True)
-        return waveform
+    def __call__(self, noisy_path, clean_path) -> tuple[Tensor, int]:
+        noisy_waveform, noisy_orig_sr = torchaudio.load(str(noisy_path))
+        noisy_waveform = torchaudio.functional.resample(
+            noisy_waveform, noisy_orig_sr, self.sampling_rate
+        )
+        noisy_waveform = torch.mean(noisy_waveform, dim=0, keepdim=True)
+        offset = np.random.randint(0, noisy_waveform.shape[-1] - self.length)
+        noisy_waveform = noisy_waveform[None, :, offset : offset + self.length]
+
+        if clean_path is not None:
+            clean_waveform, clean_orig_sr = torchaudio.load(str(clean_path))
+            clean_waveform = torchaudio.functional.resample(
+                clean_waveform, clean_orig_sr, self.sampling_rate
+            )
+            clean_waveform = torch.mean(clean_waveform, dim=0, keepdim=True)
+            clean_waveform = clean_waveform[None, :, offset : offset + self.length]
+        else:
+            clean_waveform = torch.empty_like(noisy_waveform)
+        return noisy_waveform, clean_waveform
 
 
 class NoiseDataModule(pl.LightningDataModule):
@@ -36,13 +51,14 @@ class NoiseDataModule(pl.LightningDataModule):
         self,
         data_dir: str,
         sampling_rate: int = 16000,
+        length: int = 2048,
         num_workers: int = 4,
         batch_size: int = 128,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.train_transforms = Transform(sampling_rate)
-        self.val_transforms = Transform(sampling_rate)
+        self.train_transforms = Transform(sampling_rate, length)
+        self.val_transforms = Transform(sampling_rate, length)
 
     def get_files(self, data_dir: str | PathLike) -> list[tuple[Path, Path | None]]:
         data_dir = Path(data_dir)
@@ -59,28 +75,6 @@ class NoiseDataModule(pl.LightningDataModule):
         data_dir = Path(self.hparams.data_dir)
         self.train_files = self.get_files(data_dir / "train")
         self.val_files = self.get_files(data_dir / "val")
-
-        # scaler_path = Path("/opt/ml/input/data/mos/scaler.npy")
-        # save_file = Path(os.environ["SM_MODEL_DIR"]) / "scaler.npy"
-        # if not scaler_path.exists():
-        #     print("==> Compute new scaler")
-        #     scaler = StandardScaler()
-        #     for noisy_path in (Path(self.hparams.data_dir) / "train" / "noisy").rglob(
-        #         "*.wav"
-        #     ):
-        #         spectrogram, _ = log_power_spectrum(
-        #             noisy_path,
-        #             self.hparams.sampling_rate,
-        #             self.hparams.n_fft,
-        #             self.hparams.hop_length,
-        #             self.hparams.win_length,
-        #             self.hparams.eps,
-        #         )
-        #         scaler.partial_fit(spectrogram)
-        #     np.save(save_file, scaler)
-        # else:
-        #     print("==> Use precomputed scaler")
-        #     # scaler_path.rename(save_file)
 
     def setup(self, stage: str) -> None:
         """Data operations to perform on every GPUs.
@@ -130,11 +124,5 @@ class NoiseDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, Tensor]:
         noisy_path, clean_path = self.files[index]
-        noisy_waveform = self.transform(noisy_path)
-
-        if clean_path is not None:
-            clean_waveform = self.transform(clean_path)
-        else:
-            clean_waveform = torch.empty_like(noisy_waveform)
-
+        noisy_waveform, clean_waveform = self.transform(noisy_path, clean_path)
         return noisy_waveform, clean_waveform

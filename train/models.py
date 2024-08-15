@@ -30,12 +30,16 @@ class Model(pl.LightningModule):
         for i in range(encoder_n_layers):
             self.encoder.append(
                 nn.Sequential(
-                    nn.Conv1d(
-                        in_channels, hidden_channels, kernel_size=3, stride=2, padding=1
+                    nn.Conv2d(
+                        in_channels,
+                        hidden_channels,
+                        kernel_size=(1, 4),
+                        stride=(1, 4),
+                        padding=(0, 1),
                     ),
                     nn.ReLU(),
-                    nn.Conv1d(hidden_channels, hidden_channels * 2, 1),
-                    nn.GLU(dim=1),
+                    # nn.Conv2d(hidden_channels, hidden_channels, 1),
+                    # nn.ReLU(),
                 )
             )
             in_channels = hidden_channels
@@ -44,15 +48,15 @@ class Model(pl.LightningModule):
                 # no relu at end
                 self.decoder.append(
                     nn.Sequential(
-                        nn.Conv1d(hidden_channels, hidden_channels * 2, 1),
-                        nn.GLU(dim=1),
-                        nn.ConvTranspose1d(
+                        # nn.Conv2d(hidden_channels, hidden_channels, 1),
+                        # nn.ReLU(),
+                        nn.ConvTranspose2d(
                             hidden_channels,
                             out_channels,
-                            kernel_size=3,
-                            stride=2,
-                            padding=1,
-                            output_padding=1,
+                            kernel_size=(1, 4),
+                            stride=(1, 4),
+                            padding=(0, 1),
+                            output_padding=(0, 2),
                         ),
                     )
                 )
@@ -60,15 +64,15 @@ class Model(pl.LightningModule):
                 self.decoder.insert(
                     0,
                     nn.Sequential(
-                        nn.Conv1d(hidden_channels, hidden_channels * 2, 1),
-                        nn.GLU(dim=1),
-                        nn.ConvTranspose1d(
+                        #     nn.Conv2d(hidden_channels, hidden_channels, 1),
+                        #     nn.ReLU(),
+                        nn.ConvTranspose2d(
                             hidden_channels,
                             out_channels,
-                            kernel_size=3,
-                            stride=2,
-                            padding=1,
-                            output_padding=1,
+                            kernel_size=(1, 4),
+                            stride=(1, 4),
+                            padding=(0, 1),
+                            output_padding=(0, 2),
                         ),
                         nn.ReLU(),
                     ),
@@ -88,11 +92,8 @@ class Model(pl.LightningModule):
             module.bias.data /= torch.sqrt(alpha)
 
     def forward(self, waveforms):
-        B, C, L = waveforms.shape
-        assert C == 1
-
         # normalization and padding
-        std = waveforms.std(dim=2, keepdim=True) + 1e-3
+        std = waveforms.std(dim=-1, keepdim=True) + 1e-3
         x = waveforms / std
 
         # encoder
@@ -101,6 +102,15 @@ class Model(pl.LightningModule):
             x = downsampling_block(x)
             skip_connections.append(x)
         skip_connections = skip_connections[::-1]
+
+        # decoder
+        for i, upsampling_block in enumerate(self.decoder):
+            skip_i = skip_connections[i]
+            x = x + skip_i[:, :, : x.shape[-1]]
+            x = upsampling_block(x)
+
+        x = x * std
+        return x
 
         # # attention mask for causal inference; for non-causal, set attn_mask to None
         # len_s = x.shape[-1]  # length at bottleneck
@@ -113,15 +123,6 @@ class Model(pl.LightningModule):
         # x = self.tsfm_encoder(x, src_mask=attn_mask)
         # x = x.permute(0, 2, 1)
         # x = self.tsfm_conv2(x)  # C 512 -> 1024
-
-        # decoder
-        for i, upsampling_block in enumerate(self.decoder):
-            skip_i = skip_connections[i]
-            x = x + skip_i[:, :, : x.shape[-1]]
-            x = upsampling_block(x)
-
-        x = x * std
-        return x
 
     def training_step(self, batch, batch_idx):
         noisy_waveforms, clean_waveforms = batch
@@ -165,10 +166,10 @@ class Model(pl.LightningModule):
             self.hparams.win_lengths,
         ):
             x_mag = self.stft_mag(
-                x.view(-1, x.shape[2]), fft_size, hop_length, win_length
+                x.view(-1, x.shape[-1]), fft_size, hop_length, win_length
             )
             y_mag = self.stft_mag(
-                y.view(-1, x.shape[2]), fft_size, hop_length, win_length
+                y.view(-1, x.shape[-1]), fft_size, hop_length, win_length
             )
 
             # Spectral convergence loss:

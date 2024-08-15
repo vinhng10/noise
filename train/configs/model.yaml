@@ -39,7 +39,7 @@ fit:
           logging_interval: "epoch"
           log_momentum: false
     fast_dev_run: false
-    max_epochs: 500
+    max_epochs: 10000
     min_epochs: null
     max_steps: -1
     min_steps: null
@@ -72,7 +72,7 @@ fit:
     default_root_dir: null
   model:
     in_channels: 1
-    hidden_channels: 64
+    hidden_channels: 16
     out_channels: 1
     encoder_n_layers: 4
     mr_stft_lambda: 0.5
@@ -82,6 +82,7 @@ fit:
   data:
     data_dir: ./data-debug
     sampling_rate: 16000
+    length: 2048
     num_workers: 4
     batch_size: 8
   optimizer:
