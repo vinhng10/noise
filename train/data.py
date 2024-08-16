@@ -30,6 +30,7 @@ class Transform:
             noisy_waveform, noisy_orig_sr, self.sampling_rate
         )
         noisy_waveform = torch.mean(noisy_waveform, dim=0, keepdim=True)
+        noisy_waveform = noisy_waveform.unsqueeze(0)
 
         if clean_path is not None:
             clean_waveform, clean_orig_sr = torchaudio.load(str(clean_path))
@@ -37,6 +38,7 @@ class Transform:
                 clean_waveform, clean_orig_sr, self.sampling_rate
             )
             clean_waveform = torch.mean(clean_waveform, dim=0, keepdim=True)
+            clean_waveform = clean_waveform.unsqueeze(0)
         else:
             clean_waveform = torch.empty_like(noisy_waveform)
 
@@ -44,8 +46,8 @@ class Transform:
             offset = np.random.randint(
                 0, max(noisy_waveform.shape[-1] - self.length, 1)
             )
-            noisy_waveform = noisy_waveform[None, :, offset : offset + self.length]
-            clean_waveform = clean_waveform[None, :, offset : offset + self.length]
+            noisy_waveform = noisy_waveform[:, :, offset : offset + self.length]
+            clean_waveform = clean_waveform[:, :, offset : offset + self.length]
 
         return noisy_waveform, clean_waveform
 
