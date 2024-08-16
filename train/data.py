@@ -42,7 +42,7 @@ class Transform:
 
         if self.length > 0:
             offset = np.random.randint(
-                0, min(noisy_waveform.shape[-1] - self.length, 1)
+                0, max(noisy_waveform.shape[-1] - self.length, 1)
             )
             noisy_waveform = noisy_waveform[None, :, offset : offset + self.length]
             clean_waveform = clean_waveform[None, :, offset : offset + self.length]
