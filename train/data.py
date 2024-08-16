@@ -41,7 +41,9 @@ class Transform:
             clean_waveform = torch.empty_like(noisy_waveform)
 
         if self.length > 0:
-            offset = np.random.randint(0, noisy_waveform.shape[-1] - self.length)
+            offset = np.random.randint(
+                0, min(noisy_waveform.shape[-1] - self.length, 1)
+            )
             noisy_waveform = noisy_waveform[None, :, offset : offset + self.length]
             clean_waveform = clean_waveform[None, :, offset : offset + self.length]
 
