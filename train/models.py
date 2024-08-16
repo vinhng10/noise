@@ -58,12 +58,12 @@ class Model(pl.LightningModule):
                     nn.ReLU(),
                     nn.Conv2d(
                         hidden_channels,
-                        hidden_channels,
+                        hidden_channels * 2,
                         kernel_size=(1, 1),
                         stride=(1, 1),
                         padding=(0, 0),
                     ),
-                    nn.ReLU(),
+                    nn.GLU(dim=1),
                 )
             )
             in_channels = hidden_channels
@@ -73,13 +73,13 @@ class Model(pl.LightningModule):
                     nn.Sequential(
                         nn.ConvTranspose2d(
                             hidden_channels,
-                            hidden_channels,
+                            hidden_channels * 2,
                             kernel_size=(1, 1),
                             stride=(1, 1),
                             padding=(0, 0),
                             output_padding=(0, 0),
                         ),
-                        nn.ReLU(),
+                        nn.GLU(dim=1),
                         nn.ConvTranspose2d(
                             hidden_channels,
                             out_channels,
@@ -96,13 +96,13 @@ class Model(pl.LightningModule):
                     nn.Sequential(
                         nn.ConvTranspose2d(
                             hidden_channels,
-                            hidden_channels,
+                            hidden_channels * 2,
                             kernel_size=(1, 1),
                             stride=(1, 1),
                             padding=(0, 0),
                             output_padding=(0, 0),
                         ),
-                        nn.ReLU(),
+                        nn.GLU(dim=1),
                         nn.ConvTranspose2d(
                             hidden_channels,
                             out_channels,
