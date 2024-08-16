@@ -132,4 +132,4 @@ class NoiseDataset(Dataset):
     def __getitem__(self, index: int) -> Dict[str, Tensor]:
         noisy_path, clean_path = self.files[index]
         noisy_waveform, clean_waveform = self.transform(noisy_path, clean_path)
-        return noisy_waveform, clean_waveform
+        return noisy_waveform, clean_waveform, clean_path.stem[6:]

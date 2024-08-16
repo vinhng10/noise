@@ -75,7 +75,6 @@ fit:
     hidden_channels: 64
     out_channels: 1
     encoder_n_layers: 6
-    embed_size: 8
     mr_stft_lambda: 0.5
     fft_sizes: [512, 1024, 2048]
     hop_lengths: [50, 120, 240]
@@ -83,7 +82,7 @@ fit:
   data:
     data_dir: ./data-debug
     sampling_rate: 16000
-    length: 16000
+    length: 0
     num_workers: 4
     batch_size: 8
   optimizer:
