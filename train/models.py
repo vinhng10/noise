@@ -31,22 +31,22 @@ class Model(pl.LightningModule):
         for i in range(encoder_n_layers):
             self.encoder.append(
                 nn.Sequential(
-                    nn.Conv2d(
+                    nn.Conv1d(
                         in_channels,
                         hidden_channels,
-                        kernel_size=(1, 3),
-                        stride=(1, 2),
-                        padding=(0, 1),
+                        kernel_size=3,
+                        stride=2,
+                        padding=1,
                     ),
                     nn.ReLU(),
-                    nn.Conv2d(
+                    nn.Conv1d(
                         hidden_channels,
-                        hidden_channels,
-                        kernel_size=(1, 1),
-                        stride=(1, 1),
-                        padding=(0, 0),
+                        hidden_channels * 2,
+                        kernel_size=1,
+                        stride=1,
+                        padding=0,
                     ),
-                    nn.ReLU(),
+                    nn.GLU(dim=1),
                 )
             )
             in_channels = hidden_channels
@@ -54,22 +54,21 @@ class Model(pl.LightningModule):
             if i == 0:
                 self.decoder.append(
                     nn.Sequential(
-                        nn.ConvTranspose2d(
+                        nn.Conv1d(
                             hidden_channels,
-                            hidden_channels,
-                            kernel_size=(1, 1),
-                            stride=(1, 1),
-                            padding=(0, 0),
-                            output_padding=(0, 0),
+                            hidden_channels * 2,
+                            kernel_size=1,
+                            stride=1,
+                            padding=0,
                         ),
-                        nn.ReLU(),
-                        nn.ConvTranspose2d(
+                        nn.GLU(dim=1),
+                        nn.ConvTranspose1d(
                             hidden_channels,
                             out_channels,
-                            kernel_size=(1, 3),
-                            stride=(1, 2),
-                            padding=(0, 1),
-                            output_padding=(0, 1),
+                            kernel_size=3,
+                            stride=2,
+                            padding=1,
+                            output_padding=1,
                         ),
                     ),
                 )
@@ -77,22 +76,21 @@ class Model(pl.LightningModule):
                 self.decoder.insert(
                     0,
                     nn.Sequential(
-                        nn.ConvTranspose2d(
+                        nn.Conv1d(
                             hidden_channels,
-                            hidden_channels,
-                            kernel_size=(1, 1),
-                            stride=(1, 1),
-                            padding=(0, 0),
-                            output_padding=(0, 0),
+                            hidden_channels * 2,
+                            kernel_size=1,
+                            stride=1,
+                            padding=0,
                         ),
-                        nn.ReLU(),
-                        nn.ConvTranspose2d(
+                        nn.GLU(dim=1),
+                        nn.ConvTranspose1d(
                             hidden_channels,
                             out_channels,
-                            kernel_size=(1, 3),
-                            stride=(1, 2),
-                            padding=(0, 1),
-                            output_padding=(0, 1),
+                            kernel_size=3,
+                            stride=2,
+                            padding=1,
+                            output_padding=1,
                         ),
                         nn.ReLU(),
                     ),
