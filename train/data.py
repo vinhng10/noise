@@ -79,19 +79,19 @@ class NoiseDataModule(pl.LightningDataModule):
     def prepare_data(self) -> None:
         """Data operation to perform only on main process."""
         data_dir = Path(self.hparams.data_dir)
-        if not data_dir.exists():
-            s3 = boto3.client("s3")
-            paginator = s3.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket="db-noise", Prefix="datasets/train/"):
-                if "Contents" in page:
-                    for obj in page["Contents"]:
-                        key = obj["Key"]
+        s3 = boto3.client("s3")
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket="db-noise", Prefix="datasets/train/"):
+            if "Contents" in page:
+                for obj in page["Contents"]:
+                    key = obj["Key"]
 
-                        # Skip directories (keys ending with '/')
-                        if key.endswith("/"):
-                            continue
+                    # Skip directories (keys ending with '/')
+                    if key.endswith("/"):
+                        continue
 
-                        file_name = data_dir / "/".join(key.split("/")[1:])
+                    file_name = data_dir / "/".join(key.split("/")[1:])
+                    if not file_name.exists():
                         file_name.parent.mkdir(parents=True, exist_ok=True)
 
                         # Download the file
