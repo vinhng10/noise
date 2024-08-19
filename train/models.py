@@ -163,18 +163,6 @@ class Model(pl.LightningModule):
         x = x * std
         return x
 
-        # # attention mask for causal inference; for non-causal, set attn_mask to None
-        # len_s = x.shape[-1]  # length at bottleneck
-        # attn_mask = (
-        #     1 - torch.triu(torch.ones((1, len_s, len_s), device=x.device), diagonal=1)
-        # ).bool()
-
-        # x = self.tsfm_conv1(x)  # C 1024 -> 512
-        # x = x.permute(0, 2, 1)
-        # x = self.tsfm_encoder(x, src_mask=attn_mask)
-        # x = x.permute(0, 2, 1)
-        # x = self.tsfm_conv2(x)  # C 512 -> 1024
-
     def training_step(self, batch, batch_idx):
         noisy_waveforms, clean_waveforms, _ = batch
         enhanced_waveforms = self.forward(noisy_waveforms)
