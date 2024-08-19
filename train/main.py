@@ -3,12 +3,13 @@ from lightning.pytorch.cli import LightningCLI, ReduceLROnPlateau
 
 from data import *
 from models import *
+from schedulers import *
 
 
 class CLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
         parser.add_optimizer_args(torch.optim.AdamW)
-        # parser.add_lr_scheduler_args(ReduceLROnPlateau)
+        parser.add_lr_scheduler_args(CosineAnnealingWarmupLR)
 
 
 def cli_main():
