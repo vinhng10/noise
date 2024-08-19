@@ -118,6 +118,7 @@ class Model(pl.LightningModule):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             bias=bias,
+            batch_first=True,
         )
         self.bottleneck_attention = nn.TransformerEncoder(
             encoder_layer, num_layers=num_layers
@@ -148,11 +149,11 @@ class Model(pl.LightningModule):
             skip_connections.append(x)
         skip_connections = skip_connections[::-1]
 
-        x = x.squeeze(2).permute(2, 0, 1)
+        x = x.squeeze(2).permute(0, 2, 1)
         # x = self.bottleneck_encoder(x)
         x = self.bottleneck_attention(x)
         # x = self.bottleneck_decoder(x)
-        x = x.permute(1, 2, 0).unsqueeze(2)
+        x = x.permute(0, 2, 1).unsqueeze(2)
 
         # decoder
         for i, upsampling_block in enumerate(self.decoder):

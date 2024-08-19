@@ -13,6 +13,11 @@ export default function Home() {
 
   const startAudio = async () => {
     try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter.features.has("shader-f16")) {
+        console.log("====> shader-f16");
+      }
+
       // Create a new MessageChannel
       const messageChannel = new MessageChannel();
 
