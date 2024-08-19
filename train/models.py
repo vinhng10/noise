@@ -97,6 +97,8 @@ class Model(pl.LightningModule):
                 )
             out_channels = hidden_channels
 
+            hidden_channels *= 2
+
         # self.apply(self._init_weights)
 
     def _init_weights(self, module):

@@ -1,3 +1,4 @@
+import boto3
 import torch
 import warnings
 import torchaudio
@@ -74,14 +75,33 @@ class NoiseDataModule(pl.LightningDataModule):
             fileid = f'fileid_{noisy_path.stem.split("_")[-1]}'
             clean_path = data_dir / "clean" / f"clean_{fileid}.wav"
             clean_path = clean_path if clean_path.exists() else None
-            files.append((noisy_path, clean_path))
+            new_noisy_path = data_dir / "noisy" / f"noisy_{fileid}.wav"
+            noisy_path.rename(new_noisy_path)
+            files.append((new_noisy_path, clean_path))
         return files
 
     def prepare_data(self) -> None:
         """Data operation to perform only on main process."""
         data_dir = Path(self.hparams.data_dir)
+        s3 = boto3.client("s3")
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket="db-noise", Prefix="datasets/train/"):
+            if "Contents" in page:
+                for obj in page["Contents"]:
+                    key = obj["Key"]
+
+                    # Skip directories (keys ending with '/')
+                    if key.endswith("/"):
+                        continue
+
+                    file_name = data_dir / "/".join(key.split("/")[1:])
+                    file_name.parent.mkdir(parents=True, exist_ok=True)
+
+                    # Download the file
+                    s3.download_file("db-noise", key, file_name)
+
         self.train_files = self.get_files(data_dir / "train")
-        self.val_files = self.get_files(data_dir / "val")
+        # self.val_files = self.get_files(data_dir / "val")
 
     def setup(self, stage: str) -> None:
         """Data operations to perform on every GPUs.
@@ -93,7 +113,7 @@ class NoiseDataModule(pl.LightningDataModule):
         """
         if stage == "fit":
             self.trainset = NoiseDataset(self.train_files, self.train_transforms)
-            self.valset = NoiseDataset(self.val_files, self.val_transforms)
+            # self.valset = NoiseDataset(self.val_files, self.val_transforms)
         elif stage == "predict":
             self.valset = NoiseDataset(self.val_files, self.val_transforms)
         else:
