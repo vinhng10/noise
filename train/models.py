@@ -148,7 +148,7 @@ class Model(pl.LightningModule):
             skip_connections.append(x)
         skip_connections = skip_connections[::-1]
 
-        x = x.squeeze().permute(2, 0, 1)
+        x = x.squeeze(2).permute(2, 0, 1)
         x = self.bottleneck_encoder(x)
         x = self.bottleneck_attention(x)
         x = self.bottleneck_decoder(x)
