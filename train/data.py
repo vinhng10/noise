@@ -98,9 +98,6 @@ class NoiseDataModule(pl.LightningDataModule):
                             # Download the file
                             s3.download_file("db-noise", key, file_name)
 
-        self.train_files = self.get_files(data_dir / "train")
-        self.val_files = self.get_files(data_dir / "val")
-
     def setup(self, stage: str) -> None:
         """Data operations to perform on every GPUs.
 
@@ -109,9 +106,13 @@ class NoiseDataModule(pl.LightningDataModule):
         stage : str
             _description_
         """
+        data_dir = Path(self.hparams.data_dir)
+        self.train_files = self.get_files(data_dir / "train")
+        self.val_files = self.get_files(data_dir / "val")
+
         if stage == "fit":
             self.trainset = NoiseDataset(self.train_files, self.train_transforms)
-            # self.valset = NoiseDataset(self.val_files, self.val_transforms)
+            self.valset = NoiseDataset(self.val_files, self.val_transforms)
         elif stage == "predict":
             self.valset = NoiseDataset(self.val_files, self.val_transforms)
         else:
