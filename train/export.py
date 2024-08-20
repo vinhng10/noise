@@ -33,27 +33,25 @@ class DataReader(CalibrationDataReader):
 if __name__ == "__main__":
     model = Model(
         in_channels=1,
-        hidden_channels=32,
+        hidden_channels=64,
         out_channels=1,
         encoder_n_layers=4,
-        dilation=1,
-        d_model=128,
         nhead=4,
         dim_feedforward=512,
         num_layers=2,
         dropout=0.0,
-        bias=False,
+        bias=True,
         mr_stft_lambda=0.5,
         fft_sizes=[512, 1024, 2048],
         hop_lengths=[50, 120, 240],
         win_lengths=[240, 600, 1200],
     )
     # model = Model.load_from_checkpoint(
-    #     "./logs/model-1.0.0/checkpoints/epoch=624-train_loss=1.973.ckpt"
+    #     "./logs/model-1.0.0/checkpoints/epoch=63-train_loss=0.736.ckpt"
     # ).eval()
     model.to_onnx(
         "/workspaces/noise/demo/src/app/model.onnx",
-        torch.randn((1, 1, 1, 48000)),
+        torch.randn((1, 1, 1, 4000)),
         export_params=True,
         do_constant_folding=True,
         input_names=["input"],
