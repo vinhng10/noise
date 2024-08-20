@@ -177,7 +177,7 @@ class Model(pl.LightningModule):
                 "train_l1_loss": l1_loss,
                 "train_mrstft_loss": mrstft_loss,
             },
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             prog_bar=True,
             logger=True,

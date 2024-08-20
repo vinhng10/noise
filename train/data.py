@@ -1,3 +1,4 @@
+import random
 import boto3
 import torch
 import warnings
@@ -56,6 +57,7 @@ class NoiseDataModule(pl.LightningDataModule):
         data_dir: str,
         sampling_rate: int = 16000,
         length: int = 2048,
+        num_samples: int = 120000,
         num_workers: int = 4,
         batch_size: int = 128,
     ) -> None:
@@ -74,7 +76,8 @@ class NoiseDataModule(pl.LightningDataModule):
             new_noisy_path = data_dir / "noisy" / f"noisy_{fileid}.wav"
             noisy_path.rename(new_noisy_path)
             files.append((new_noisy_path, clean_path))
-        return files
+        random.shuffle(files)
+        return files[: self.hparams.num_samples]
 
     def prepare_data(self) -> None:
         """Data operation to perform only on main process."""
