@@ -91,7 +91,7 @@ fit:
     sampling_rate: 16000
     length: 0
     num_workers: 4
-    batch_size: 8
+    batch_size: 16
   optimizer:
     lr: 1.0
     betas:
@@ -106,8 +106,8 @@ fit:
     differentiable: false
     fused: null
   lr_scheduler:
-    max_lr: 2e-4
-    min_lr: 2e-4
+    max_lr: 1e-3
+    min_lr: 1e-3
     warmup_steps: 0
     training_steps: 100
     num_cycles: 0.5
