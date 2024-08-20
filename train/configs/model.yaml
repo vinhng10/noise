@@ -74,7 +74,8 @@ fit:
     in_channels: 1
     hidden_channels: 32
     out_channels: 1
-    encoder_n_layers: 3
+    encoder_n_layers: 4
+    dilation: 1
     d_model: 128
     nhead: 4
     dim_feedforward: 512
@@ -86,7 +87,7 @@ fit:
     hop_lengths: [50, 120, 240]
     win_lengths: [240, 600, 1200]
   data:
-    data_dir: ./data
+    data_dir: ./data-debug
     sampling_rate: 16000
     length: 0
     num_workers: 4
@@ -107,6 +108,6 @@ fit:
   lr_scheduler:
     max_lr: 2e-4
     min_lr: 2e-4
-    warmup_steps: 500
+    warmup_steps: 0
     training_steps: 100
     num_cycles: 0.5
