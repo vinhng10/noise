@@ -6,7 +6,7 @@ ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 class PipelineSingleton {
   static session = null;
   static loading = false;
-  static input = new Float32Array(48000);
+  static input = new Float32Array(4000);
 
   static async getSession() {
     if (this.session === null && !this.loading) {
@@ -26,7 +26,7 @@ class PipelineSingleton {
   }
 
   static updateInput(newInput) {
-    const input = new Float32Array(48000);
+    const input = new Float32Array(4000);
     const oldInput = this.input.slice(128);
     input.set(oldInput, 0);
     input.set(newInput, oldInput.length);
@@ -48,9 +48,9 @@ self.onmessage = async (event) => {
     const tensor = new ort.Tensor(
       "float32",
       PipelineSingleton.getInput(),
-      [1, 1, 1, 48000]
+      [1, 1, 1, 4000]
     );
     const result = await session.run({ input: tensor });
-    port.postMessage(result.output.data.slice(48000 - 128));
+    port.postMessage(result.output.data.slice(4000 - 128));
   }
 };
