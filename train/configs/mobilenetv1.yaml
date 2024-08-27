@@ -74,9 +74,9 @@ fit:
     in_channels: 1
     hidden_channels: 64
     out_channels: 1
-    encoder_n_layers: 6
+    encoder_n_layers: 4
     nhead: 4
-    dim_feedforward: 512
+    dim_feedforward: 256
     num_layers: 2
     dropout: 0.0
     bias: false
@@ -107,6 +107,6 @@ fit:
   lr_scheduler:
     max_lr: 1e-3
     min_lr: 1e-3
-    warmup_steps: 0
+    warmup_steps: 100
     training_steps: 100
     num_cycles: 0.5

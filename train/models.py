@@ -222,25 +222,27 @@ class DepthwiseSeparableConv(nn.Module):
 
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias):
         super().__init__()
-        self.depthwise = nn.Conv1d(
+        self.depthwise = nn.Conv2d(
             in_channels=in_channels,
             out_channels=in_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
+            kernel_size=[1, kernel_size],
+            stride=[1, stride],
+            padding=[0, padding],
             groups=in_channels,
             bias=bias,
         )
-        self.pointwise = nn.Conv1d(
+        self.norm1 = nn.GroupNorm(in_channels, in_channels)
+        self.pointwise = nn.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=1,
             bias=bias,
         )
+        self.norm2 = nn.GroupNorm(out_channels, out_channels)
 
     def forward(self, x):
-        out = F.relu6(self.depthwise(x), inplace=True)
-        out = F.relu6(self.pointwise(out), inplace=True)
+        out = F.relu6(self.norm1(self.depthwise(x)), inplace=True)
+        out = F.relu6(self.norm2(self.pointwise(out)), inplace=True)
         return out
 
 
@@ -257,25 +259,27 @@ class DepthwiseSeparableConvTranspose(nn.Module):
         bias,
     ):
         super().__init__()
-        self.depthwise = nn.ConvTranspose1d(
+        self.depthwise = nn.ConvTranspose2d(
             in_channels=in_channels,
             out_channels=in_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            output_padding=output_padding,
+            kernel_size=[1, kernel_size],
+            stride=[1, stride],
+            padding=[0, padding],
+            output_padding=[0, output_padding],
             bias=bias,
         )
-        self.pointwise = nn.Conv1d(
+        self.norm1 = nn.GroupNorm(in_channels, in_channels)
+        self.pointwise = nn.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=1,
             bias=bias,
         )
+        self.norm2 = nn.GroupNorm(out_channels, out_channels)
 
     def forward(self, x):
-        out = F.relu6(self.depthwise(x), inplace=True)
-        out = F.relu6(self.pointwise(out), inplace=True)
+        out = F.relu6(self.norm1(self.depthwise(x)), inplace=True)
+        out = F.relu6(self.norm2(self.pointwise(out)), inplace=True)
         return out
 
 
@@ -320,6 +324,18 @@ class MobileNetV1(Model):
 
             # hidden_channels *= 2
 
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_channels,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+            bias=bias,
+        )
+        self.bottleneck_attention = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers
+        )
+
     def forward(self, waveforms):
         std = waveforms.std(dim=-1, keepdim=True) + 1e-3
         x = waveforms / std
@@ -331,9 +347,9 @@ class MobileNetV1(Model):
             skip_connections.append(x)
         skip_connections = skip_connections[::-1]
 
-        # x = x.squeeze(2).permute(2, 0, 1)
-        # x = self.bottleneck_attention(x)
-        # x = x.permute(1, 2, 0).unsqueeze(2)
+        x = x.squeeze(2).permute(0, 2, 1)
+        x = self.bottleneck_attention(x)
+        x = x.permute(0, 2, 1).unsqueeze(2)
 
         # decoder
         for i, upsampling_block in enumerate(self.decoder):
