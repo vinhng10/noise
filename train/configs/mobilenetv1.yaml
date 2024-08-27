@@ -10,18 +10,18 @@ fit:
     logger:
       class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
-        save_dir: /opt/ml/model/logs
+        save_dir: ./logs
         name: null
-        version: multiconvnet-1.0.0
+        version: mobilenetv1-1.0.0
         log_graph: false
-        default_hp_metric: true
+        default_hp_metric: false
         prefix: ""
         sub_dir: null
     callbacks:
       - class_path: lightning.pytorch.callbacks.ModelCheckpoint
         init_args:
           dirpath: null
-          filename: "{epoch}-{train_loss:.3f}-{val_mos_ovr:.3f}"
+          filename: "{epoch}-{train_loss:.3f}"
           monitor: train_loss
           verbose: false
           save_last: true
@@ -39,7 +39,7 @@ fit:
           logging_interval: "epoch"
           log_momentum: false
     fast_dev_run: false
-    max_epochs: 10000
+    max_epochs: -1
     min_epochs: null
     max_steps: -1
     min_steps: null
@@ -56,7 +56,7 @@ fit:
     enable_checkpointing: null
     enable_progress_bar: null
     enable_model_summary: null
-    accumulate_grad_batches: 4
+    accumulate_grad_batches: 1
     gradient_clip_val: null
     gradient_clip_algorithm: null
     deterministic: null
@@ -71,22 +71,28 @@ fit:
     reload_dataloaders_every_n_epochs: 0
     default_root_dir: null
   model:
-    base_n_filters: 16
-    bias: true
-    n_frames: 1251
-    n_fft: 512
-    win_length: 512
-    hop_length: 128
-    p835_model_path: /opt/ml/input/data/mos/p835.onnx
-    p808_model_path: /opt/ml/input/data/mos/p808.onnx
-    global_stats_path: /opt/ml/input/data/mos/scaler.npy
+    in_channels: 1
+    hidden_channels: 64
+    out_channels: 1
+    encoder_n_layers: 6
+    nhead: 4
+    dim_feedforward: 512
+    num_layers: 2
+    dropout: 0.0
+    bias: false
+    mr_stft_lambda: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_lengths: [50, 120, 240]
+    win_lengths: [240, 600, 1200]
   data:
-    data_dir: /opt/ml/input/data
+    data_dir: ./data-debug
     sampling_rate: 16000
-    num_workers: 4
-    batch_size: 32
+    length: 4096
+    num_samples: 10000
+    num_workers: 2
+    batch_size: 16
   optimizer:
-    lr: 1e-3
+    lr: 1.0
     betas:
       - 0.9
       - 0.999
@@ -98,14 +104,9 @@ fit:
     capturable: false
     differentiable: false
     fused: null
-# lr_scheduler:
-#   monitor: val_mos_ovr
-#   mode: max
-#   factor: 0.5
-#   patience: 10
-#   threshold: 1e-4
-#   threshold_mode: rel
-#   cooldown: 0
-#   min_lr: 1e-6
-#   eps: 1.0e-08
-#   verbose: false
+  lr_scheduler:
+    max_lr: 1e-3
+    min_lr: 1e-3
+    warmup_steps: 0
+    training_steps: 100
+    num_cycles: 0.5

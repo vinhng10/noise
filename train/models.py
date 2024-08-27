@@ -10,6 +10,65 @@ import torch.nn.functional as F
 class Model(pl.LightningModule):
     SUPPORTED_SAMPLING_RATE = 16000
 
+    def training_step(self, batch, batch_idx):
+        noisy_waveforms, clean_waveforms, _ = batch
+        enhanced_waveforms = self.forward(noisy_waveforms)
+        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+        mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
+            enhanced_waveforms, clean_waveforms
+        )
+        loss = l1_loss + mrstft_loss
+        self.log_dict(
+            {
+                "train_loss": loss,
+                "train_l1_loss": l1_loss,
+                "train_mrstft_loss": mrstft_loss,
+            },
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        return loss
+
+    def stft_mag(self, input, fft_size, hop_length, win_length):
+        x_stft = torch.stft(
+            input,
+            fft_size,
+            hop_length,
+            win_length,
+            window=torch.hann_window(win_length, device=input.device),
+            return_complex=True,
+        )
+
+        # NOTE(kan-bayashi): clamp is needed to avoid nan or inf
+        return x_stft.abs().clamp(min=math.sqrt(1e-7)).transpose(2, 1)
+
+    def multi_resolution_stft_loss(self, x, y):
+        loss = 0
+        for fft_size, hop_length, win_length in zip(
+            self.hparams.fft_sizes,
+            self.hparams.hop_lengths,
+            self.hparams.win_lengths,
+        ):
+            x_mag = self.stft_mag(
+                x.view(-1, x.shape[-1]), fft_size, hop_length, win_length
+            )
+            y_mag = self.stft_mag(
+                y.view(-1, x.shape[-1]), fft_size, hop_length, win_length
+            )
+
+            # Spectral convergence loss:
+            sc_loss = torch.norm(y_mag - x_mag, p="fro") / torch.norm(y_mag, p="fro")
+            # Log STFT magnitude loss:
+            log_mag_loss = F.l1_loss(torch.log(y_mag), torch.log(x_mag))
+
+            loss += sc_loss + log_mag_loss
+        return loss
+
+
+class CleanUNet(Model):
+
     def __init__(
         self,
         in_channels: int,
@@ -120,7 +179,7 @@ class Model(pl.LightningModule):
         self.bottleneck_attention = nn.TransformerEncoder(
             encoder_layer, num_layers=num_layers
         )
-        
+
         # self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -158,58 +217,129 @@ class Model(pl.LightningModule):
         x = x * std
         return x
 
-    def training_step(self, batch, batch_idx):
-        noisy_waveforms, clean_waveforms, _ = batch
-        enhanced_waveforms = self.forward(noisy_waveforms)
-        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
-        mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
-            enhanced_waveforms, clean_waveforms
-        )
-        loss = l1_loss + mrstft_loss
-        self.log_dict(
-            {
-                "train_loss": loss,
-                "train_l1_loss": l1_loss,
-                "train_mrstft_loss": mrstft_loss,
-            },
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-        return loss
 
-    def stft_mag(self, input, fft_size, hop_length, win_length):
-        x_stft = torch.stft(
-            input,
-            fft_size,
-            hop_length,
-            win_length,
-            window=torch.hann_window(win_length, device=input.device),
-            return_complex=True,
+class DepthwiseSeparableConv(nn.Module):
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias):
+        super().__init__()
+        self.depthwise = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=in_channels,
+            bias=bias,
+        )
+        self.pointwise = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            bias=bias,
         )
 
-        # NOTE(kan-bayashi): clamp is needed to avoid nan or inf
-        return x_stft.abs().clamp(min=math.sqrt(1e-7)).transpose(2, 1)
+    def forward(self, x):
+        out = F.relu6(self.depthwise(x), inplace=True)
+        out = F.relu6(self.pointwise(out), inplace=True)
+        return out
 
-    def multi_resolution_stft_loss(self, x, y):
-        loss = 0
-        for fft_size, hop_length, win_length in zip(
-            self.hparams.fft_sizes,
-            self.hparams.hop_lengths,
-            self.hparams.win_lengths,
-        ):
-            x_mag = self.stft_mag(
-                x.view(-1, x.shape[-1]), fft_size, hop_length, win_length
+
+class DepthwiseSeparableConvTranspose(nn.Module):
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        output_padding,
+        bias,
+    ):
+        super().__init__()
+        self.depthwise = nn.ConvTranspose1d(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            output_padding=output_padding,
+            bias=bias,
+        )
+        self.pointwise = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            bias=bias,
+        )
+
+    def forward(self, x):
+        out = F.relu6(self.depthwise(x), inplace=True)
+        out = F.relu6(self.pointwise(out), inplace=True)
+        return out
+
+
+class MobileNetV1(Model):
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        out_channels: int,
+        encoder_n_layers: int,
+        nhead: int,
+        dim_feedforward: int,
+        num_layers: int,
+        dropout: float,
+        bias: bool,
+        mr_stft_lambda: float,
+        fft_sizes: List[int],
+        hop_lengths: List[int],
+        win_lengths: List[int],
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        # encoder and decoder
+        self.encoder = nn.ModuleList()
+        self.decoder = nn.ModuleList()
+
+        for i in range(encoder_n_layers):
+            self.encoder.append(
+                DepthwiseSeparableConv(in_channels, hidden_channels, 3, 2, 1, bias)
             )
-            y_mag = self.stft_mag(
-                y.view(-1, x.shape[-1]), fft_size, hop_length, win_length
+            in_channels = hidden_channels
+
+            self.decoder.insert(
+                0,
+                DepthwiseSeparableConvTranspose(
+                    hidden_channels, out_channels, 3, 2, 1, 1, bias
+                ),
             )
+            out_channels = hidden_channels
 
-            # Spectral convergence loss:
-            sc_loss = torch.norm(y_mag - x_mag, p="fro") / torch.norm(y_mag, p="fro")
-            # Log STFT magnitude loss:
-            log_mag_loss = F.l1_loss(torch.log(y_mag), torch.log(x_mag))
+            # hidden_channels *= 2
 
-            loss += sc_loss + log_mag_loss
-        return loss
+    def forward(self, waveforms):
+        std = waveforms.std(dim=-1, keepdim=True) + 1e-3
+        x = waveforms / std
+
+        # encoder
+        skip_connections = []
+        for downsampling_block in self.encoder:
+            x = downsampling_block(x)
+            skip_connections.append(x)
+        skip_connections = skip_connections[::-1]
+
+        # x = x.squeeze(2).permute(2, 0, 1)
+        # x = self.bottleneck_attention(x)
+        # x = x.permute(1, 2, 0).unsqueeze(2)
+
+        # decoder
+        for i, upsampling_block in enumerate(self.decoder):
+            skip_i = skip_connections[i]
+            x = x + skip_i[:, :, : x.shape[-1]]
+            x = upsampling_block(x)
+
+        x = x * std
+        return x
