@@ -259,6 +259,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
         padding,
         output_padding,
         bias,
+        is_output=False,
     ):
         super().__init__()
         self.module = nn.Sequential(
@@ -269,18 +270,19 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 stride=[1, stride],
                 padding=[0, padding],
                 output_padding=[0, output_padding],
+                groups=in_channels,
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
             nn.ReLU6(inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
-                out_channels=out_channels * 2,
+                out_channels=out_channels * (2 if not is_output else 1),
                 kernel_size=1,
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.GLU(dim=1),
+            nn.GLU(dim=1) if not is_output else nn.Identity(),
         )
 
     def forward(self, x):
@@ -321,24 +323,24 @@ class MobileNetV1(Model):
             self.decoder.insert(
                 0,
                 DepthwiseSeparableConvTranspose(
-                    hidden_channels, out_channels, 3, 2, 1, 1, bias
+                    hidden_channels, out_channels, 3, 2, 1, 1, bias, i == 0
                 ),
             )
             out_channels = hidden_channels
 
             hidden_channels *= 2
 
-        # encoder_layer = nn.TransformerEncoderLayer(
-        #     d_model=hidden_channels // 2,
-        #     nhead=nhead,
-        #     dim_feedforward=hidden_channels // 2,
-        #     dropout=dropout,
-        #     batch_first=True,
-        #     bias=bias,
-        # )
-        # self.bottleneck_attention = nn.TransformerEncoder(
-        #     encoder_layer, num_layers=num_layers
-        # )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_channels // 2,
+            nhead=nhead,
+            dim_feedforward=hidden_channels // 2,
+            dropout=dropout,
+            batch_first=True,
+            bias=bias,
+        )
+        self.bottleneck_attention = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers
+        )
 
     def forward(self, waveforms):
         std = waveforms.std(dim=-1, keepdim=True) + 1e-3
@@ -351,9 +353,9 @@ class MobileNetV1(Model):
             skip_connections.append(x)
         skip_connections = skip_connections[::-1]
 
-        # x = x.squeeze(2).permute(0, 2, 1)
-        # x = self.bottleneck_attention(x)
-        # x = x.permute(0, 2, 1).unsqueeze(2)
+        x = x.squeeze(2).permute(0, 2, 1)
+        x = self.bottleneck_attention(x)
+        x = x.permute(0, 2, 1).unsqueeze(2)
 
         # decoder
         for i, upsampling_block in enumerate(self.decoder):
