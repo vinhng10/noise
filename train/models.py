@@ -222,30 +222,30 @@ class DepthwiseSeparableConv(nn.Module):
 
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias):
         super().__init__()
-        self.depthwise = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=in_channels,
-            kernel_size=[1, kernel_size],
-            stride=[1, stride],
-            padding=[0, padding],
-            groups=in_channels,
-            bias=bias,
+        self.module = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=in_channels,
+                kernel_size=[1, kernel_size],
+                stride=[1, stride],
+                padding=[0, padding],
+                groups=in_channels,
+                bias=bias,
+            ),
+            # nn.BatchNorm2d(in_channels),
+            nn.ReLU6(inplace=True),
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels * 2,
+                kernel_size=1,
+                bias=bias,
+            ),
+            # nn.BatchNorm2d(in_channels),
+            nn.GLU(dim=1),
         )
-        # self.norm1 = nn.BatchNorm2d(in_channels)
-        self.pointwise = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=1,
-            bias=bias,
-        )
-        # self.norm2 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x):
-        # out = F.relu6(self.norm1(self.depthwise(x)), inplace=True)
-        # out = F.relu6(self.norm2(self.pointwise(out)), inplace=True)
-        out = F.relu6(self.depthwise(x), inplace=True)
-        out = F.relu6(self.pointwise(out), inplace=True)
-        return out
+        return self.module(x)
 
 
 class DepthwiseSeparableConvTranspose(nn.Module):
@@ -261,30 +261,30 @@ class DepthwiseSeparableConvTranspose(nn.Module):
         bias,
     ):
         super().__init__()
-        self.depthwise = nn.ConvTranspose2d(
-            in_channels=in_channels,
-            out_channels=in_channels,
-            kernel_size=[1, kernel_size],
-            stride=[1, stride],
-            padding=[0, padding],
-            output_padding=[0, output_padding],
-            bias=bias,
+        self.module = nn.Sequential(
+            nn.ConvTranspose2d(
+                in_channels=in_channels,
+                out_channels=in_channels,
+                kernel_size=[1, kernel_size],
+                stride=[1, stride],
+                padding=[0, padding],
+                output_padding=[0, output_padding],
+                bias=bias,
+            ),
+            # nn.BatchNorm2d(in_channels),
+            nn.ReLU6(inplace=True),
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels * 2,
+                kernel_size=1,
+                bias=bias,
+            ),
+            # nn.BatchNorm2d(in_channels),
+            nn.GLU(dim=1),
         )
-        # self.norm1 = nn.BatchNorm2d(in_channels)
-        self.pointwise = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=1,
-            bias=bias,
-        )
-        # self.norm2 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x):
-        # out = F.relu6(self.norm1(self.depthwise(x)), inplace=True)
-        # out = F.relu6(self.norm2(self.pointwise(out)), inplace=True)
-        out = F.relu6(self.depthwise(x), inplace=True)
-        out = F.relu6(self.pointwise(out), inplace=True)
-        return out
+        return self.module(x)
 
 
 class MobileNetV1(Model):
@@ -326,19 +326,19 @@ class MobileNetV1(Model):
             )
             out_channels = hidden_channels
 
-            # hidden_channels *= 2
+            hidden_channels *= 2
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_channels,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-            bias=bias,
-        )
-        self.bottleneck_attention = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers
-        )
+        # encoder_layer = nn.TransformerEncoderLayer(
+        #     d_model=hidden_channels // 2,
+        #     nhead=nhead,
+        #     dim_feedforward=hidden_channels // 2,
+        #     dropout=dropout,
+        #     batch_first=True,
+        #     bias=bias,
+        # )
+        # self.bottleneck_attention = nn.TransformerEncoder(
+        #     encoder_layer, num_layers=num_layers
+        # )
 
     def forward(self, waveforms):
         std = waveforms.std(dim=-1, keepdim=True) + 1e-3
@@ -351,9 +351,9 @@ class MobileNetV1(Model):
             skip_connections.append(x)
         skip_connections = skip_connections[::-1]
 
-        x = x.squeeze(2).permute(0, 2, 1)
-        x = self.bottleneck_attention(x)
-        x = x.permute(0, 2, 1).unsqueeze(2)
+        # x = x.squeeze(2).permute(0, 2, 1)
+        # x = self.bottleneck_attention(x)
+        # x = x.permute(0, 2, 1).unsqueeze(2)
 
         # decoder
         for i, upsampling_block in enumerate(self.decoder):
