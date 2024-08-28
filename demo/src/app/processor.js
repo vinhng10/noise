@@ -17,12 +17,10 @@ class Processor extends AudioWorkletProcessor {
     const input = inputs[0];
     const output = outputs[0];
 
-    for (let i = 0; i < input[0].length; i++) {
-      this.mono[i] = (input[0][i] + input[1][i]) / 2;
-      output[0][i] = output[1][i] = this.output[i];
-    }
+    output[0].set(this.output);
+    output[1].set(this.output);
 
-    this.workerPort.postMessage(this.mono);
+    this.workerPort.postMessage(input[0]);
 
     return true;
   }

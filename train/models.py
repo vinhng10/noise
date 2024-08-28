@@ -24,7 +24,7 @@ class Model(pl.LightningModule):
                 "train_l1_loss": l1_loss,
                 "train_mrstft_loss": mrstft_loss,
             },
-            on_step=True,
+            on_step=False,
             on_epoch=True,
             prog_bar=True,
             logger=True,
@@ -231,18 +231,20 @@ class DepthwiseSeparableConv(nn.Module):
             groups=in_channels,
             bias=bias,
         )
-        self.norm1 = nn.GroupNorm(in_channels, in_channels)
+        # self.norm1 = nn.BatchNorm2d(in_channels)
         self.pointwise = nn.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=1,
             bias=bias,
         )
-        self.norm2 = nn.GroupNorm(out_channels, out_channels)
+        # self.norm2 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x):
-        out = F.relu6(self.norm1(self.depthwise(x)), inplace=True)
-        out = F.relu6(self.norm2(self.pointwise(out)), inplace=True)
+        # out = F.relu6(self.norm1(self.depthwise(x)), inplace=True)
+        # out = F.relu6(self.norm2(self.pointwise(out)), inplace=True)
+        out = F.relu6(self.depthwise(x), inplace=True)
+        out = F.relu6(self.pointwise(out), inplace=True)
         return out
 
 
@@ -268,18 +270,20 @@ class DepthwiseSeparableConvTranspose(nn.Module):
             output_padding=[0, output_padding],
             bias=bias,
         )
-        self.norm1 = nn.GroupNorm(in_channels, in_channels)
+        # self.norm1 = nn.BatchNorm2d(in_channels)
         self.pointwise = nn.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=1,
             bias=bias,
         )
-        self.norm2 = nn.GroupNorm(out_channels, out_channels)
+        # self.norm2 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x):
-        out = F.relu6(self.norm1(self.depthwise(x)), inplace=True)
-        out = F.relu6(self.norm2(self.pointwise(out)), inplace=True)
+        # out = F.relu6(self.norm1(self.depthwise(x)), inplace=True)
+        # out = F.relu6(self.norm2(self.pointwise(out)), inplace=True)
+        out = F.relu6(self.depthwise(x), inplace=True)
+        out = F.relu6(self.pointwise(out), inplace=True)
         return out
 
 
