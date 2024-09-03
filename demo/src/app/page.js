@@ -111,21 +111,12 @@ export default function Home() {
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-12">
-      <h1 className="text-5xl font-bold mb-2 text-center">Transformers.js</h1>
-      <h2 className="text-2xl mb-4 text-center">
-        Next.js template (client-side)
-      </h2>
-      <input
-        type="text"
-        className="w-full max-w-xs p-2 border border-gray-300 rounded mb-4"
-        placeholder="Enter text here"
-        onInput={(e) => {
-          classify(e.target.value);
-        }}
-      />
+      <h1 className="text-5xl font-bold mb-2 text-center">
+        Noise Suppression ???
+      </h1>
       <div className="mb-4">
         <button
-          className={`px-4 py-2 rounded mr-2 ${
+          className={`px-8 py-4 text-lg rounded mr-4 ${
             isAudioOn ? "bg-gray-300" : "bg-green-500 text-white"
           }`}
           onClick={startAudio}
@@ -134,7 +125,7 @@ export default function Home() {
           On
         </button>
         <button
-          className={`px-4 py-2 rounded ${
+          className={`px-8 py-4 text-lg rounded ${
             !isAudioOn ? "bg-gray-300" : "bg-red-500 text-white"
           }`}
           onClick={stopAudio}

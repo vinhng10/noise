@@ -1,6 +1,6 @@
 import torch
 import onnx
-from models import Model
+from models import *
 from data import NoiseDataModule
 from onnxconverter_common import float16
 from onnxruntime.quantization import quantize_static, QuantType

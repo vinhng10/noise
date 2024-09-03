@@ -2,10 +2,9 @@ import * as ort from "onnxruntime-web/webgpu";
 
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
-let count = 0;
 let session = null;
 let loading = false;
-let input = new Float32Array(1024);
+let input = new Float32Array(4096);
 
 let getSession = async () => {
   if (session === null && !loading) {
@@ -19,8 +18,7 @@ let getSession = async () => {
 };
 
 let updateInput = (newInput) => {
-  count += 128;
-  const tmp = new Float32Array(1024);
+  const tmp = new Float32Array(4096);
   const oldInput = input.slice(128);
   tmp.set(oldInput, 0);
   tmp.set(newInput, oldInput.length);
@@ -38,8 +36,8 @@ self.onmessage = async (event) => {
   };
 
   while (true) {
-    const tensor = new ort.Tensor("float32", input, [1, 1, 1, 1024]);
+    const tensor = new ort.Tensor("float32", input, [1, 1, 1, 4096]);
     const result = await session.run({ input: tensor });
-    port.postMessage(result.output.data.slice(1024 - 128));
+    port.postMessage(result.output.data.slice(4096 - 128));
   }
 };
