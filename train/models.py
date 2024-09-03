@@ -791,7 +791,7 @@ class KnowledgeDistillation(Model):
 
         ckpt_path = teacher.pop("ckpt_path")
         checkpoint = torch.load(
-            ckpt_path, map_location="gpu" if torch.cuda.is_available() else "cpu"
+            ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu"
         )
         self.teacher = OriginalCleanUNet(**teacher)
         self.teacher.load_state_dict(checkpoint["model_state_dict"])
