@@ -31,27 +31,49 @@ class DataReader(CalibrationDataReader):
 
 
 if __name__ == "__main__":
-    model = Model(
-        in_channels=1,
-        hidden_channels=64,
-        out_channels=1,
-        encoder_n_layers=4,
-        nhead=4,
-        dim_feedforward=512,
-        num_layers=2,
-        dropout=0.0,
-        bias=True,
-        mr_stft_lambda=0.5,
-        fft_sizes=[512, 1024, 2048],
-        hop_lengths=[50, 120, 240],
-        win_lengths=[240, 600, 1200],
+    # model = MobileNetV1(
+    #     in_channels=1,
+    #     hidden_channels=32,
+    #     out_channels=1,
+    #     encoder_n_layers=4,
+    #     nhead=4,
+    #     dim_feedforward=256,
+    #     num_layers=2,
+    #     dropout=0.0,
+    #     bias=False,
+    #     mr_stft_lambda=0.5,
+    #     fft_sizes=[512, 1024, 2048],
+    #     hop_lengths=[50, 120, 240],
+    #     win_lengths=[240, 600, 1200],
+    # )
+
+    checkpoint = torch.load(
+        "./logs/kd-1.0.0/checkpoints/epoch=3141-train_loss=0.468.ckpt",
+        map_location=torch.device("cpu"),
     )
-    # model = Model.load_from_checkpoint(
-    #     "./logs/model-1.0.0/checkpoints/epoch=63-train_loss=0.736.ckpt"
+    student_weights = {
+        k.removeprefix("student."): v
+        for k, v in checkpoint["state_dict"].items()
+        if k.startswith("student.")
+    }
+
+    model = MobileNetV1(
+        **checkpoint["hyper_parameters"]["student"],
+        mr_stft_lambda=0,
+        fft_sizes=[],
+        hop_lengths=[],
+        win_lengths=[]
+    )
+    model.load_state_dict(student_weights)
+    model.eval()
+    print(model)
+
+    # model = CleanUNet.load_from_checkpoint(
+    #     "./logs/model-1.0.1/checkpoints/epoch=9850-train_loss=1.104.ckpt"
     # ).eval()
     model.to_onnx(
         "/workspaces/noise/demo/src/app/model.onnx",
-        torch.randn((1, 1, 1, 4000)),
+        torch.randn((1, 1, 1, 4096)),
         export_params=True,
         do_constant_folding=True,
         input_names=["input"],

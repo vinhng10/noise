@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, Dict, List
 import math
 import lightning.pytorch as pl
 import torch
@@ -767,8 +767,8 @@ class MobileNetV1(Model):
 class KnowledgeDistillation(Model):
     def __init__(
         self,
-        student,
-        teacher,
+        student: Dict[str, Any],
+        teacher: Dict[str, Any],
         mr_stft_lambda: float,
         fft_sizes: List[int],
         hop_lengths: List[int],
