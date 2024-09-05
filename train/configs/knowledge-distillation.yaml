@@ -94,7 +94,7 @@ fit:
       tsfm_d_model: 512
       tsfm_d_inner: 2048
       ckpt_path: ./data-debug/checkpoints/pretrained.pkl
-    mr_stft_lambda: 0.1
+    mr_stft_lambda: 1e-2
     fft_sizes: [512, 1024, 2048]
     hop_lengths: [50, 120, 240]
     win_lengths: [240, 600, 1200]
