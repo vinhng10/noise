@@ -80,7 +80,7 @@ fit:
       nhead: 2
       num_layers: 2
       dropout: 0.0
-      bias: false
+      bias: true
     teacher:
       channels_input: 1
       channels_output: 1

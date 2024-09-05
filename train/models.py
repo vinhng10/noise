@@ -628,7 +628,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.Hardswish(inplace=True),
+            nn.PReLU(),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -636,7 +636,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.Hardswish(inplace=True),
+            nn.PReLU(),
         )
 
     def forward(self, x):
@@ -669,7 +669,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.Hardswish(inplace=True),
+            nn.PReLU(),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -677,7 +677,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.Hardswish(inplace=True) if not is_output else nn.Identity(),
+            nn.PReLU() if not is_output else nn.Identity(),
         )
 
     def forward(self, x):
@@ -706,24 +706,48 @@ class MobileNetV1(Model):
         self.save_hyperparameters()
 
         # encoder and decoder
-        self.encoder = nn.ModuleList()
-        self.decoder = nn.ModuleList()
+        self.encoder = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        hidden_channels,
+                        kernel_size=(1, 3),
+                        stride=(1, 2),
+                        padding=(0, 1),
+                        bias=bias,
+                    ),
+                    nn.PReLU(),
+                )
+            ]
+        )
+        self.decoder = nn.ModuleList(
+            [
+                nn.ConvTranspose2d(
+                    hidden_channels,
+                    out_channels,
+                    kernel_size=(1, 3),
+                    stride=(1, 2),
+                    padding=(0, 1),
+                    output_padding=(0, 1),
+                    bias=bias,
+                )
+            ]
+        )
 
         for i in range(encoder_n_layers):
+            in_channels = hidden_channels
+            out_channels = hidden_channels
+            hidden_channels = min(hidden_channels * 2, max_channels)
             self.encoder.append(
                 DepthwiseSeparableConv(in_channels, hidden_channels, 3, 2, 1, bias)
             )
-            in_channels = hidden_channels
-
             self.decoder.insert(
                 0,
                 DepthwiseSeparableConvTranspose(
                     hidden_channels, out_channels, 3, 2, 1, 1, bias, i == 0
                 ),
             )
-            out_channels = hidden_channels
-
-            hidden_channels = min(hidden_channels * 2, max_channels)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_channels,
@@ -784,7 +808,9 @@ class KnowledgeDistillation(Model):
             win_lengths=win_lengths,
         )
 
-        self.encoder_matcher = nn.Conv1d(student["max_channels"], 512, 1, 1, 7)
+        self.encoder_matcher = nn.Conv1d(
+            student["max_channels"], teacher["max_H"], 1, 1, 3
+        )
         self.decoder_matcher = nn.Conv1d(
             student["hidden_channels"], teacher["channels_H"], 1, 1, 63
         )
