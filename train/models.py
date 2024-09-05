@@ -811,9 +811,9 @@ class KnowledgeDistillation(Model):
         self.encoder_matcher = nn.Conv1d(
             student["max_channels"], teacher["max_H"], 1, 1, 3
         )
-        self.decoder_matcher = nn.Conv1d(
-            student["hidden_channels"], teacher["channels_H"], 1, 1, 63
-        )
+        # self.decoder_matcher = nn.Conv1d(
+        #     student["hidden_channels"], teacher["channels_H"], 1, 1, 63
+        # )
 
         ckpt_path = teacher.pop("ckpt_path")
         checkpoint = torch.load(
@@ -834,11 +834,10 @@ class KnowledgeDistillation(Model):
         t_enhanceds, t_downs, t_ups = self.teacher(noisies.squeeze(2))
 
         # Knowledge distillation loss:
-        kd_loss = 0
-        kd_loss += F.mse_loss(
+        kd_loss = 10 * F.mse_loss(
             self.encoder_matcher(s_downs[-1].squeeze(2)), t_downs[len(s_downs) - 1]
         )
-        kd_loss += F.mse_loss(self.decoder_matcher(s_ups[-1].squeeze(2)), t_ups[-1])
+        # kd_loss += F.mse_loss(self.decoder_matcher(s_ups[-1].squeeze(2)), t_ups[-1])
 
         # Speech enhancement loss:
         l1_loss = F.l1_loss(s_enhanceds, cleans)

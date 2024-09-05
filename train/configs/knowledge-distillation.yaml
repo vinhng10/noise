@@ -12,7 +12,7 @@ fit:
       init_args:
         save_dir: ./logs
         name: null
-        version: kd-1.0.0
+        version: kd-1.0.2
         log_graph: false
         default_hp_metric: false
         prefix: ""
@@ -94,7 +94,7 @@ fit:
       tsfm_d_model: 512
       tsfm_d_inner: 2048
       ckpt_path: ./data-debug/checkpoints/pretrained.pkl
-    mr_stft_lambda: 1e-2
+    mr_stft_lambda: 1e-1
     fft_sizes: [512, 1024, 2048]
     hop_lengths: [50, 120, 240]
     win_lengths: [240, 600, 1200]
