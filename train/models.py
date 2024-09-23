@@ -787,6 +787,27 @@ class MobileNetV1(Model):
         x = x * std
         return x, downs[::-1], ups
 
+    def training_step(self, batch, batch_idx):
+        noisy_waveforms, clean_waveforms, _ = batch
+        enhanced_waveforms, _, _ = self.forward(noisy_waveforms)
+        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+        mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
+            enhanced_waveforms, clean_waveforms
+        )
+        loss = l1_loss + mrstft_loss
+        self.log_dict(
+            {
+                "train_loss": loss,
+                "train_l1_loss": l1_loss,
+                "train_mrstft_loss": mrstft_loss,
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        return loss
+
 
 class KnowledgeDistillation(Model):
     def __init__(

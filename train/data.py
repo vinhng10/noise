@@ -11,8 +11,6 @@ from typing import Dict
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 
-warnings.filterwarnings("ignore", category=np.ComplexWarning)
-
 
 ################################################################################
 

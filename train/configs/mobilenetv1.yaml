@@ -25,7 +25,7 @@ fit:
           monitor: train_loss
           verbose: false
           save_last: true
-          save_top_k: 10
+          save_top_k: 3
           save_weights_only: false
           mode: min
           auto_insert_metric_name: true
@@ -39,7 +39,7 @@ fit:
           logging_interval: "epoch"
           log_momentum: false
     fast_dev_run: false
-    max_epochs: -1
+    max_epochs: 20000
     min_epochs: null
     max_steps: -1
     min_steps: null
@@ -73,20 +73,21 @@ fit:
   model:
     in_channels: 1
     hidden_channels: 16
+    max_channels: 64
     out_channels: 1
     encoder_n_layers: 4
     nhead: 2
     num_layers: 2
     dropout: 0.0
-    bias: false
+    bias: true
     mr_stft_lambda: 0.5
     fft_sizes: [512, 1024, 2048]
     hop_lengths: [50, 120, 240]
     win_lengths: [240, 600, 1200]
   data:
-    data_dir: ./data-debug
+    data_dir: ./data
     sampling_rate: 16000
-    length: 4096
+    length: 0
     num_samples: 10000
     num_workers: 2
     batch_size: 16
@@ -104,8 +105,8 @@ fit:
     differentiable: false
     fused: null
   lr_scheduler:
-    max_lr: 1e-3
-    min_lr: 1e-3
+    max_lr: 2e-4
+    min_lr: 2e-4
     warmup_steps: 100
     training_steps: 100
     num_cycles: 0.5
