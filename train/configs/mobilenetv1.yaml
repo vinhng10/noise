@@ -81,12 +81,12 @@ fit:
     dropout: 0.0
     bias: true
     mr_stft_lambda: 0.5
-    fft_sizes: [512, 1024, 2048]
-    hop_lengths: [50, 120, 240]
-    win_lengths: [240, 600, 1200]
+    fft_sizes: [1536, 3072, 6144]
+    hop_lengths: [150, 360, 720]
+    win_lengths: [720, 1800, 3600]
   data:
     data_dir: ./data
-    sampling_rate: 16000
+    sampling_rate: 48000
     length: 0
     num_samples: 10000
     num_workers: 2
@@ -97,7 +97,7 @@ fit:
       - 0.9
       - 0.999
     eps: 1.0e-08
-    weight_decay: 0
+    weight_decay: 1e-2
     amsgrad: false
     maximize: false
     foreach: null
