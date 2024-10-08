@@ -3,48 +3,72 @@ import * as ort from "onnxruntime-web/webgpu";
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
 let cutoff = 100;
+let size = 10;
 
 // Returns a low-pass transform function for use with TransformStream.
 function lowPassFilter(session) {
   const format = "f32-planar";
   let lastValuePerChannel = undefined;
+  let buffer = undefined;
+  let rc = 1.0 / (cutoff * 2 * Math.PI);
+  let dt = undefined;
+  let alpha = undefined;
+  let offset = 0;
+  let outputs = [];
+  let lastOutput = undefined;
 
   return async (data, controller) => {
-    const rc = 1.0 / (cutoff * 2 * Math.PI);
-    const dt = 1.0 / data.sampleRate;
-    const alpha = dt / (rc + dt);
-    const nChannels = data.numberOfChannels;
     if (!lastValuePerChannel) {
-      console.log(`Audio stream has ${nChannels} channels.`);
-      lastValuePerChannel = Array(nChannels).fill(0);
+      console.log(`Audio stream has ${data.numberOfChannels} channels.`);
+      lastValuePerChannel = Array(1).fill(0);
     }
-    const buffer = new Float32Array(data.numberOfFrames * nChannels * 10);
-    for (let c = 0; c < nChannels; c++) {
-      const offset = data.numberOfFrames * c;
-      const samples = buffer.subarray(offset, offset + data.numberOfFrames);
-      data.copyTo(samples, { planeIndex: c, format });
-      let lastValue = lastValuePerChannel[c];
+    if (!buffer) buffer = new Float32Array(data.numberOfFrames * size);
+    if (!lastOutput) lastOutput = new Float32Array(data.numberOfFrames);
+    if (!dt) dt = 1.0 / data.sampleRate;
+    if (!alpha) alpha = dt / (rc + dt);
 
-      // Apply low-pass filter to samples.
-      for (let i = 0; i < samples.length; ++i) {
-        lastValue = lastValue + alpha * (samples[i] - lastValue);
-        samples[i] = lastValue;
-      }
+    const samples = buffer.subarray(
+      offset * data.numberOfFrames,
+      (offset + 1) * data.numberOfFrames
+    );
+    data.copyTo(samples, { planeIndex: 0, format });
+    let lastValue = lastValuePerChannel[0];
 
-      lastValuePerChannel[c] = lastValue;
+    // Apply low-pass filter to samples.
+    for (let i = 0; i < samples.length; ++i) {
+      lastValue = lastValue + alpha * (samples[i] - lastValue);
+      samples[i] = lastValue;
+    }
 
-      const tensor = new ort.Tensor("float32", buffer, [1, 1, 1, 4800]);
+    lastValuePerChannel[0] = lastValue;
+    offset += 1;
+
+    if (offset === size) {
+      console.log(offset);
+      const tensor = new ort.Tensor("float32", buffer, [
+        1,
+        1,
+        1,
+        buffer.length,
+      ]);
       const result = await session.run({ input: tensor });
-      samples.set(result.output.data.slice(0, 480));
+      const output = result.output.data;
+      for (let i = 0; i < output.length; i += data.numberOfFrames) {
+        outputs.push(output.subarray(i, i + data.numberOfFrames));
+      }
+      offset = 0;
     }
+
+    if (outputs.length > 0) lastOutput = outputs.shift();
+
     controller.enqueue(
       new AudioData({
         format,
         sampleRate: data.sampleRate,
         numberOfFrames: data.numberOfFrames,
-        numberOfChannels: nChannels,
+        numberOfChannels: data.numberOfChannels,
         timestamp: data.timestamp,
-        data: buffer.slice(0, 480),
+        data: lastOutput,
       })
     );
   };
