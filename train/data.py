@@ -144,12 +144,16 @@ class NoiseDataset(Dataset):
     def __init__(self, files: list[tuple[Path, Path | None]], transform: Transform):
         super().__init__()
         self.files = files
-        self.transform = transform
+        self.data = list(
+            map(
+                lambda paths: (*transform(paths[0], paths[1]), paths[1].stem[6:]),
+                self.files,
+            )
+        )
 
     def __len__(self) -> int:
         return len(self.files)
 
     def __getitem__(self, index: int) -> Dict[str, Tensor]:
-        noisy_path, clean_path = self.files[index]
-        noisy_waveform, clean_waveform = self.transform(noisy_path, clean_path)
-        return noisy_waveform, clean_waveform, clean_path.stem[6:]
+        noisy_waveform, clean_waveform, id = self.data[index]
+        return noisy_waveform, clean_waveform, id
