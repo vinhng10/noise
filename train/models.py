@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import torchaudio
 
 
 # Teacher:
@@ -398,7 +399,7 @@ class OriginalCleanUNet(nn.Module):
             x = upsampling_block(x)
 
         x = x[:, :, :L] * std
-        return x, skip_connections[::-1], ups
+        return x
 
 
 # Model Definition:
@@ -628,7 +629,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.PReLU(),
+            nn.ReLU(),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -636,7 +637,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.PReLU(),
+            nn.ReLU(),
         )
 
     def forward(self, x):
@@ -669,7 +670,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.PReLU(),
+            nn.ReLU(),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -677,7 +678,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.PReLU() if not is_output else nn.Identity(),
+            nn.ReLU() if not is_output else nn.Identity(),
         )
 
     def forward(self, x):
@@ -692,11 +693,16 @@ class MobileNetV1(Model):
         hidden_channels: int,
         max_channels: int,
         out_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
         encoder_n_layers: int,
         nhead: int,
         num_layers: int,
         dropout: float,
         bias: bool,
+        src_sampling_rate: int,
+        tgt_sampling_rate: int,
         mr_stft_lambda: float,
         fft_sizes: List[int],
         hop_lengths: List[int],
@@ -712,12 +718,12 @@ class MobileNetV1(Model):
                     nn.Conv2d(
                         in_channels,
                         hidden_channels,
-                        kernel_size=(1, 3),
-                        stride=(1, 2),
-                        padding=(0, 1),
+                        kernel_size=(1, kernel_size),
+                        stride=(1, stride),
+                        padding=(0, padding),
                         bias=bias,
                     ),
-                    nn.PReLU(),
+                    nn.ReLU(),
                 )
             ]
         )
@@ -726,10 +732,10 @@ class MobileNetV1(Model):
                 nn.ConvTranspose2d(
                     hidden_channels,
                     out_channels,
-                    kernel_size=(1, 3),
-                    stride=(1, 2),
-                    padding=(0, 1),
-                    output_padding=(0, 1),
+                    kernel_size=(1, kernel_size),
+                    stride=(1, stride),
+                    padding=(0, padding),
+                    output_padding=(0, 0),
                     bias=bias,
                 )
             ]
@@ -740,30 +746,63 @@ class MobileNetV1(Model):
             out_channels = hidden_channels
             hidden_channels = min(hidden_channels * 2, max_channels)
             self.encoder.append(
-                DepthwiseSeparableConv(in_channels, hidden_channels, 3, 2, 1, bias)
+                DepthwiseSeparableConv(
+                    in_channels, hidden_channels, kernel_size, stride, padding, bias
+                )
             )
             self.decoder.insert(
                 0,
                 DepthwiseSeparableConvTranspose(
-                    hidden_channels, out_channels, 3, 2, 1, 1, bias, i == 0
+                    hidden_channels,
+                    out_channels,
+                    kernel_size,
+                    stride,
+                    padding,
+                    0,
+                    bias,
+                    i == 0,
                 ),
             )
 
-        encoder_layer = nn.TransformerEncoderLayer(
+        self.bottleneck_attention = TransformerEncoder(
+            d_word_vec=hidden_channels,
+            n_layers=num_layers,
+            n_head=nhead,
+            d_k=hidden_channels // nhead,
+            d_v=hidden_channels // nhead,
             d_model=hidden_channels,
-            nhead=nhead,
-            dim_feedforward=hidden_channels,
+            d_inner=hidden_channels,
             dropout=dropout,
-            batch_first=True,
-            bias=bias,
-        )
-        self.bottleneck_attention = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers
+            n_position=0,
+            scale_emb=False,
         )
 
     def forward(self, waveforms):
-        std = waveforms.std(dim=-1, keepdim=True) + 1e-3
-        x = waveforms / std
+        x = torchaudio.functional.resample(
+            waveforms,
+            self.hparams.src_sampling_rate,
+            self.hparams.tgt_sampling_rate,
+        )
+
+        x = self._forward(x)
+
+        x = torchaudio.functional.resample(
+            x,
+            self.hparams.tgt_sampling_rate,
+            self.hparams.src_sampling_rate,
+        )
+        return x
+
+    def _forward(self, x):
+        L = x.shape[-1]
+        std = x.std(dim=-1, keepdim=True) + 1e-3
+        x = x / std
+        x = padding(
+            x,
+            self.hparams.encoder_n_layers + 1,
+            self.hparams.kernel_size,
+            self.hparams.stride,
+        )
 
         # encoder
         downs = []
@@ -773,7 +812,8 @@ class MobileNetV1(Model):
         downs = downs[::-1]
 
         x = x.squeeze(2).permute(0, 2, 1)
-        x = self.bottleneck_attention(x)
+        x = self.bottleneck_attention(x, None)
+        print(x.shape)
         x = x.permute(0, 2, 1).unsqueeze(2)
 
         # decoder
@@ -781,15 +821,15 @@ class MobileNetV1(Model):
         for i, upsampling_block in enumerate(self.decoder):
             ups.append(x)
             skip_i = downs[i]
-            x = x + skip_i[:, :, : x.shape[-1]]
+            x = x + skip_i[:, :, :, : x.shape[-1]]
             x = upsampling_block(x)
 
-        x = x * std
-        return x, downs[::-1], ups
+        x = x[:, :, :, :L] * std
+        return x
 
     def training_step(self, batch, batch_idx):
         noisy_waveforms, clean_waveforms, _ = batch
-        enhanced_waveforms, _, _ = self.forward(noisy_waveforms)
+        enhanced_waveforms = self._forward(noisy_waveforms)
         l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
         mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
             enhanced_waveforms, clean_waveforms
