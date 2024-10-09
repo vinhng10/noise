@@ -629,7 +629,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -637,7 +637,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
@@ -670,7 +670,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -678,7 +678,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.ReLU() if not is_output else nn.Identity(),
+            nn.ReLU(inplace=True) if not is_output else nn.Identity(),
         )
 
     def forward(self, x):
@@ -723,7 +723,7 @@ class MobileNetV1(Model):
                         padding=(0, padding),
                         bias=bias,
                     ),
-                    nn.ReLU(),
+                    nn.ReLU(inplace=True),
                 )
             ]
         )
