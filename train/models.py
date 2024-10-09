@@ -813,7 +813,6 @@ class MobileNetV1(Model):
 
         x = x.squeeze(2).permute(0, 2, 1)
         x = self.bottleneck_attention(x, None)
-        print(x.shape)
         x = x.permute(0, 2, 1).unsqueeze(2)
 
         # decoder
