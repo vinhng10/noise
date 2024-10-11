@@ -3,7 +3,8 @@ import * as ort from "onnxruntime-web/webgpu";
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
 let cutoff = 100;
-let size = 10;
+let maxSize = 300;
+let size = 50;
 
 // Returns a low-pass transform function for use with TransformStream.
 function lowPassFilter(session) {
@@ -13,38 +14,38 @@ function lowPassFilter(session) {
   let rc = 1.0 / (cutoff * 2 * Math.PI);
   let dt = undefined;
   let alpha = undefined;
+  let frames = undefined;
   let offset = 0;
   let outputs = [];
-  let lastOutput = undefined;
 
   return async (data, controller) => {
     if (!lastValuePerChannel) {
       console.log(`Audio stream has ${data.numberOfChannels} channels.`);
       lastValuePerChannel = Array(1).fill(0);
     }
-    if (!buffer) buffer = new Float32Array(data.numberOfFrames * size);
-    if (!lastOutput) lastOutput = new Float32Array(data.numberOfFrames);
+    if (!frames) frames = data.numberOfFrames;
+    if (!buffer) buffer = new Float32Array(frames * maxSize);
     if (!dt) dt = 1.0 / data.sampleRate;
     if (!alpha) alpha = dt / (rc + dt);
 
+    // Extract audio data from input:
     const samples = buffer.subarray(
-      offset * data.numberOfFrames,
-      (offset + 1) * data.numberOfFrames
+      (maxSize - size + offset) * frames,
+      (maxSize - size + offset + 1) * frames
     );
     data.copyTo(samples, { planeIndex: 0, format });
-    let lastValue = lastValuePerChannel[0];
+    offset += 1;
 
-    // Apply low-pass filter to samples.
+    // Apply low-pass filter to samples:
+    let lastValue = lastValuePerChannel[0];
     for (let i = 0; i < samples.length; ++i) {
       lastValue = lastValue + alpha * (samples[i] - lastValue);
       samples[i] = lastValue;
     }
-
     lastValuePerChannel[0] = lastValue;
-    offset += 1;
 
+    // Run audio processing:
     if (offset === size) {
-      console.log(offset);
       const tensor = new ort.Tensor("float32", buffer, [
         1,
         1,
@@ -52,23 +53,29 @@ function lowPassFilter(session) {
         buffer.length,
       ]);
       const result = await session.run({ input: tensor });
-      const output = result.output.data;
-      for (let i = 0; i < output.length; i += data.numberOfFrames) {
-        outputs.push(output.subarray(i, i + data.numberOfFrames));
+      console.log(result.output.data.length);
+      const output = result.output.data.subarray((maxSize - size) * frames);
+      // const output = buffer.subarray((maxSize - size) * frames);
+      for (let i = 0; i < output.length; i += frames) {
+        outputs.push(output.subarray(i, i + frames));
       }
+      buffer
+        .subarray(0, (maxSize - size) * frames)
+        .set(buffer.subarray(size * frames));
       offset = 0;
     }
 
-    if (outputs.length > 0) lastOutput = outputs.shift();
+    // Return the processed audio:
+    if (outputs.length <= 0) return;
 
     controller.enqueue(
       new AudioData({
         format,
         sampleRate: data.sampleRate,
-        numberOfFrames: data.numberOfFrames,
+        numberOfFrames: frames,
         numberOfChannels: data.numberOfChannels,
         timestamp: data.timestamp,
-        data: lastOutput,
+        data: outputs.shift(),
       })
     );
   };
