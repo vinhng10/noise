@@ -17,13 +17,13 @@ function App() {
         audio: true,
         video: false,
       });
-      const audioTracks = stream.current.getAudioTracks();
-      console.log("Using audio device: " + audioTracks[0].label);
+      const track = stream.current.getAudioTracks()[0];
+      console.log("Using audio device: " + track.label);
       stream.current.oninactive = () => {
         console.log("Stream ended");
       };
 
-      processor.current = new MediaStreamTrackProcessor(audioTracks[0]);
+      processor.current = new MediaStreamTrackProcessor(track);
       generator.current = new MediaStreamTrackGenerator("audio");
       const source = processor.current.readable;
       const sink = generator.current.writable;

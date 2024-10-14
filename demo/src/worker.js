@@ -7,7 +7,7 @@ let maxSize = 300;
 let size = 50;
 
 // Returns a low-pass transform function for use with TransformStream.
-function lowPassFilter(session) {
+function noiseFilter(session) {
   const format = "f32-planar";
   let lastValuePerChannel = undefined;
   let buffer = undefined;
@@ -96,7 +96,7 @@ onmessage = async (event) => {
     const source = event.data.source;
     const sink = event.data.sink;
     const transformer = new TransformStream({
-      transform: lowPassFilter(session),
+      transform: noiseFilter(session),
     });
     abortController = new AbortController();
     const signal = abortController.signal;
