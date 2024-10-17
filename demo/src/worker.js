@@ -2,27 +2,23 @@ import * as ort from "onnxruntime-web/webgpu";
 
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
-let cutoff = 100;
-let maxSize = 300;
-let size = 50;
+const cutoff = 500;
+const maxSize = 300;
+const size = 30;
 
 // Returns a low-pass transform function for use with TransformStream.
-function noiseFilter(session) {
+const noiseFilter = (session) => {
   const format = "f32-planar";
-  let lastValuePerChannel = undefined;
-  let buffer = undefined;
-  let rc = 1.0 / (cutoff * 2 * Math.PI);
-  let dt = undefined;
-  let alpha = undefined;
-  let frames = undefined;
+  let lastValuePerChannel = 0;
+  const rc = 1.0 / (cutoff * 2 * Math.PI);
+  let dt;
+  let alpha;
+  let frames;
   let offset = 0;
+  let buffer;
   let outputs = [];
 
   return async (data, controller) => {
-    if (!lastValuePerChannel) {
-      console.log(`Audio stream has ${data.numberOfChannels} channels.`);
-      lastValuePerChannel = Array(1).fill(0);
-    }
     if (!frames) frames = data.numberOfFrames;
     if (!buffer) buffer = new Float32Array(frames * maxSize);
     if (!dt) dt = 1.0 / data.sampleRate;
@@ -37,12 +33,12 @@ function noiseFilter(session) {
     offset += 1;
 
     // Apply low-pass filter to samples:
-    let lastValue = lastValuePerChannel[0];
+    let lastValue = lastValuePerChannel;
     for (let i = 0; i < samples.length; ++i) {
       lastValue = lastValue + alpha * (samples[i] - lastValue);
       samples[i] = lastValue;
     }
-    lastValuePerChannel[0] = lastValue;
+    lastValuePerChannel = lastValue;
 
     // Run audio processing:
     if (offset === size) {
@@ -53,9 +49,7 @@ function noiseFilter(session) {
         buffer.length,
       ]);
       const result = await session.run({ input: tensor });
-      console.log(result.output.data.length);
       const output = result.output.data.subarray((maxSize - size) * frames);
-      // const output = buffer.subarray((maxSize - size) * frames);
       for (let i = 0; i < output.length; i += frames) {
         outputs.push(output.subarray(i, i + frames));
       }
@@ -66,7 +60,8 @@ function noiseFilter(session) {
     }
 
     // Return the processed audio:
-    if (outputs.length <= 0) return;
+    const audioData = outputs.shift();
+    if (audioData == undefined) return;
 
     controller.enqueue(
       new AudioData({
@@ -75,40 +70,21 @@ function noiseFilter(session) {
         numberOfFrames: frames,
         numberOfChannels: data.numberOfChannels,
         timestamp: data.timestamp,
-        data: outputs.shift(),
+        data: audioData,
       })
     );
   };
-}
-
-let abortController;
+};
 
 onmessage = async (event) => {
-  if (event.data.command === "abort") {
-    abortController.abort();
-    abortController = null;
-  } else {
-    const url = new URL("./model.onnx", import.meta.url);
-    const session = await ort.InferenceSession.create(url.toString(), {
-      executionProviders: ["webgpu"],
-    });
-    console.log(session);
-    const source = event.data.source;
-    const sink = event.data.sink;
-    const transformer = new TransformStream({
-      transform: noiseFilter(session),
-    });
-    abortController = new AbortController();
-    const signal = abortController.signal;
-    const promise = source.pipeThrough(transformer, { signal }).pipeTo(sink);
-    promise.catch((e) => {
-      if (signal.aborted) {
-        console.log("Shutting down streams after abort.");
-      } else {
-        console.error("Error from stream transform:", e);
-      }
-      source.cancel(e);
-      sink.abort(e);
-    });
-  }
+  const url = new URL("./model.onnx", import.meta.url);
+  const session = await ort.InferenceSession.create(url.toString(), {
+    executionProviders: ["webgpu"],
+  });
+  const source = event.data.source;
+  const sink = event.data.sink;
+  const transformer = new TransformStream({
+    transform: noiseFilter(session),
+  });
+  source.pipeThrough(transformer).pipeTo(sink);
 };
