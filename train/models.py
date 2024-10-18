@@ -771,7 +771,7 @@ class MobileNetV1(Model):
             d_k=hidden_channels // nhead,
             d_v=hidden_channels // nhead,
             d_model=hidden_channels,
-            d_inner=hidden_channels,
+            d_inner=hidden_channels * 2,
             dropout=dropout,
             n_position=0,
             scale_emb=False,
