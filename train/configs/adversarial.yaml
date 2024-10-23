@@ -4,7 +4,7 @@ fit:
   trainer:
     accelerator: auto
     strategy: auto
-    devices: [0]
+    devices: auto
     num_nodes: 1
     precision: null
     logger:
@@ -117,4 +117,4 @@ fit:
     length: 0
     num_samples: 5000
     num_workers: 4
-    batch_size: 16
+    batch_size: 4
