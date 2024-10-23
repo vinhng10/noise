@@ -113,7 +113,7 @@ class NoiseDataModule(pl.LightningDataModule):
 
         if stage == "fit":
             self.trainset = NoiseDataset(self.train_files, self.train_transforms)
-            self.valset = NoiseDataset(self.val_files, self.val_transforms)
+            # self.valset = NoiseDataset(self.val_files, self.val_transforms)
         elif stage == "predict":
             self.valset = NoiseDataset(self.val_files, self.val_transforms)
         else:
@@ -129,15 +129,15 @@ class NoiseDataModule(pl.LightningDataModule):
             persistent_workers=True,
         )
 
-    def val_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.valset,
-            shuffle=False,
-            num_workers=self.hparams.num_workers,
-            batch_size=self.hparams.batch_size,
-            pin_memory=True,
-            persistent_workers=True,
-        )
+    # def val_dataloader(self) -> DataLoader:
+    #     return DataLoader(
+    #         self.valset,
+    #         shuffle=False,
+    #         num_workers=self.hparams.num_workers,
+    #         batch_size=self.hparams.batch_size,
+    #         pin_memory=True,
+    #         persistent_workers=True,
+    #     )
 
 
 class NoiseDataset(Dataset):

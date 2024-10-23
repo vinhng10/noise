@@ -629,7 +629,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.01, inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -637,7 +637,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.01, inplace=True),
         )
 
     def forward(self, x):
@@ -670,7 +670,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.01, inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -678,7 +678,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True) if not is_output else nn.Identity(),
+            nn.LeakyReLU(0.01, inplace=True) if not is_output else nn.Identity(),
         )
 
     def forward(self, x):
@@ -723,7 +723,7 @@ class MobileNetV1(Model):
                         padding=(0, padding),
                         bias=bias,
                     ),
-                    nn.ReLU(inplace=True),
+                    nn.LeakyReLU(0.01, inplace=True),
                 )
             ]
         )
@@ -922,3 +922,330 @@ class KnowledgeDistillation(Model):
             logger=True,
         )
         return loss
+
+
+class Generator(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        encoder_n_layers: int,
+        nhead: int,
+        num_layers: int,
+        dropout: float,
+        bias: bool,
+        src_sampling_rate: int,
+        tgt_sampling_rate: int,
+    ) -> None:
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.encoder_n_layers = encoder_n_layers
+        self.src_sampling_rate = src_sampling_rate
+        self.tgt_sampling_rate = tgt_sampling_rate
+
+        # encoder and decoder
+        self.encoder = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        hidden_channels,
+                        kernel_size=(1, kernel_size),
+                        stride=(1, stride),
+                        padding=(0, padding),
+                        bias=bias,
+                    ),
+                    nn.LeakyReLU(0.01, inplace=True),
+                )
+            ]
+        )
+        self.decoder = nn.ModuleList(
+            [
+                nn.ConvTranspose2d(
+                    hidden_channels,
+                    out_channels,
+                    kernel_size=(1, kernel_size),
+                    stride=(1, stride),
+                    padding=(0, padding),
+                    output_padding=(0, 0),
+                    bias=bias,
+                )
+            ]
+        )
+
+        for i in range(encoder_n_layers):
+            in_channels = hidden_channels
+            out_channels = hidden_channels
+            hidden_channels = min(hidden_channels * 2, max_channels)
+            self.encoder.append(
+                DepthwiseSeparableConv(
+                    in_channels, hidden_channels, kernel_size, stride, padding, bias
+                )
+            )
+            self.decoder.insert(
+                0,
+                DepthwiseSeparableConvTranspose(
+                    hidden_channels,
+                    out_channels,
+                    kernel_size,
+                    stride,
+                    padding,
+                    0,
+                    bias,
+                    i == 0,
+                ),
+            )
+
+        self.bottleneck_attention = TransformerEncoder(
+            d_word_vec=hidden_channels,
+            n_layers=num_layers,
+            n_head=nhead,
+            d_k=hidden_channels // nhead,
+            d_v=hidden_channels // nhead,
+            d_model=hidden_channels,
+            d_inner=hidden_channels * 2,
+            dropout=dropout,
+            n_position=0,
+            scale_emb=False,
+        )
+
+    def forward(self, waveforms):
+        x = torchaudio.functional.resample(
+            waveforms,
+            self.hparams.src_sampling_rate,
+            self.hparams.tgt_sampling_rate,
+        )
+
+        x = self._forward(x)
+
+        x = torchaudio.functional.resample(
+            x,
+            self.hparams.tgt_sampling_rate,
+            self.hparams.src_sampling_rate,
+        )
+        return x
+
+    def _forward(self, x):
+        L = x.shape[-1]
+        std = x.std(dim=-1, keepdim=True) + 1e-3
+        x = x / std
+        x = padding(x, self.encoder_n_layers + 1, self.kernel_size, self.stride)
+
+        # encoder
+        downs = []
+        for downsampling_block in self.encoder:
+            x = downsampling_block(x)
+            downs.append(x)
+        downs = downs[::-1]
+
+        x = x.squeeze(2).permute(0, 2, 1)
+        x = self.bottleneck_attention(x, None)
+        x = x.permute(0, 2, 1).unsqueeze(2)
+
+        # decoder
+        ups = []
+        for i, upsampling_block in enumerate(self.decoder):
+            ups.append(x)
+            skip_i = downs[i]
+            x = x + skip_i[:, :, :, : x.shape[-1]]
+            x = upsampling_block(x)
+
+        x = x[:, :, :, :L] * std
+        return x
+
+
+class Discriminator(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        encoder_n_layers: int,
+        bias: bool,
+    ) -> None:
+        super().__init__()
+        self.discriminator = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        hidden_channels,
+                        kernel_size=(1, kernel_size),
+                        stride=(1, stride),
+                        padding=(0, padding),
+                        bias=bias,
+                    ),
+                    nn.LeakyReLU(0.01, inplace=True),
+                )
+            ]
+        )
+        for i in range(encoder_n_layers):
+            in_channels = hidden_channels
+            hidden_channels = min(hidden_channels * 2, max_channels)
+            self.discriminator.append(
+                DepthwiseSeparableConv(
+                    in_channels, hidden_channels, kernel_size, stride, padding, bias
+                )
+            )
+
+        L = 160000
+        for _ in range(len(self.discriminator)):
+            L = 1 + np.floor((L - kernel_size) / stride)
+        self.head = nn.Sequential(nn.Linear(int(L), 1), nn.Sigmoid())
+
+    def forward(self, x: torch.FloatTensor):
+        for layer in self.discriminator:
+            x = layer(x)
+        x = x.mean(dim=1).squeeze(dim=1)
+        x = self.head(x)
+        return x
+
+
+class GAN(pl.LightningModule):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        encoder_n_layers: int,
+        nhead: int,
+        num_layers: int,
+        dropout: float,
+        bias: bool,
+        src_sampling_rate: int,
+        tgt_sampling_rate: int,
+        generator_optimizer: Dict[str, Any],
+        discriminator_optimizer: Dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+        self.automatic_optimization = False
+
+        # encoder and decoder
+        self.generator = Generator(
+            in_channels,
+            hidden_channels,
+            max_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            encoder_n_layers,
+            nhead,
+            num_layers,
+            dropout,
+            bias,
+            src_sampling_rate,
+            tgt_sampling_rate,
+        )
+        self.discriminator = Discriminator(
+            in_channels,
+            hidden_channels,
+            max_channels,
+            kernel_size,
+            stride,
+            padding,
+            encoder_n_layers,
+            bias,
+        )
+
+    def forward(self, waveforms):
+        x = torchaudio.functional.resample(
+            waveforms,
+            self.hparams.src_sampling_rate,
+            self.hparams.tgt_sampling_rate,
+        )
+
+        x = self.generator._forward(x)
+
+        x = torchaudio.functional.resample(
+            x,
+            self.hparams.tgt_sampling_rate,
+            self.hparams.src_sampling_rate,
+        )
+        return x
+
+    def adversarial_loss(self, y_hat, y):
+        return F.binary_cross_entropy(y_hat, y)
+
+    def configure_optimizers(self):
+        g_optimizer = torch.optim.AdamW(
+            self.generator.parameters(), **self.hparams.generator_optimizer
+        )
+        d_optimizer = torch.optim.AdamW(
+            self.discriminator.parameters(), **self.hparams.discriminator_optimizer
+        )
+        return [g_optimizer, d_optimizer], []
+
+    def training_step(self, batch):
+        noisy_waveforms, clean_waveforms, _ = batch
+        B = clean_waveforms.shape[0]
+
+        g_optimizer, d_optimizer = self.optimizers()
+
+        # train generator
+        # generate images
+        self.toggle_optimizer(g_optimizer)
+        enhanced_waveforms = self.generator._forward(noisy_waveforms)
+
+        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+
+        # ground truth result (ie: all fake)
+        # put on GPU because we created this tensor inside training_loop
+        valid = torch.ones(B, 1, device=clean_waveforms.device)
+
+        # adversarial loss is binary cross-entropy
+        g_loss = self.adversarial_loss(self.discriminator(enhanced_waveforms), valid)
+        self.manual_backward(g_loss + l1_loss)
+        g_optimizer.step()
+        g_optimizer.zero_grad()
+        self.untoggle_optimizer(g_optimizer)
+
+        # train discriminator
+        # Measure discriminator's ability to classify real from generated samples
+        self.toggle_optimizer(d_optimizer)
+
+        # how well can it label as real?
+        valid = torch.ones(B, 1, device=clean_waveforms.device)
+        d_valid = self.discriminator(clean_waveforms)
+        real_loss = self.adversarial_loss(d_valid, valid)
+
+        # how well can it label as fake?
+        fake = torch.zeros(B, 1, device=clean_waveforms.device)
+        d_fake = self.discriminator(enhanced_waveforms.detach())
+        fake_loss = self.adversarial_loss(d_fake, fake)
+
+        # discriminator loss is the average of these
+        d_loss = (real_loss + fake_loss) / 2
+        self.manual_backward(d_loss)
+        d_optimizer.step()
+        d_optimizer.zero_grad()
+        self.untoggle_optimizer(d_optimizer)
+
+        self.log_dict(
+            {
+                "l1_loss": l1_loss,
+                "g_loss": g_loss,
+                "d_loss": d_loss,
+                "real_acc": d_valid.mean(),
+                "fake_acc": d_fake.mean(),
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )

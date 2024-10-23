@@ -6,15 +6,16 @@ from models import *
 from schedulers import *
 
 
-class CLI(LightningCLI):
-    def add_arguments_to_parser(self, parser):
-        parser.add_optimizer_args(torch.optim.AdamW)
-        parser.add_lr_scheduler_args(CosineAnnealingWarmupLR)
+# class CLI(LightningCLI):
+# def add_arguments_to_parser(self, parser):
+#     parser.add_optimizer_args(torch.optim.AdamW, nested_key="generator_optimizer")
+#     parser.add_optimizer_args(torch.optim.AdamW, nested_key="discriminator_optimizer")
+# parser.add_lr_scheduler_args(CosineAnnealingWarmupLR)
 
 
 def cli_main():
-    cli = CLI(
-        MobileNetV1,
+    cli = LightningCLI(
+        GAN,
         NoiseDataModule,
         save_config_kwargs={"overwrite": True},
         parser_kwargs={"parser_mode": "yaml"},
