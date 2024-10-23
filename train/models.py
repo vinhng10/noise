@@ -1240,7 +1240,7 @@ class GAN(pl.LightningModule):
                 "l1_loss": l1_loss,
                 "g_loss": g_loss,
                 "d_loss": d_loss,
-                "real_acc": d_valid.mean(),
+                "real_acc": d_real.mean(),
                 "fake_acc": d_fake.mean(),
             },
             on_step=False,
