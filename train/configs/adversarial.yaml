@@ -4,7 +4,7 @@ fit:
   trainer:
     accelerator: auto
     strategy: auto
-    devices: auto
+    devices: [0]
     num_nodes: 1
     precision: null
     logger:

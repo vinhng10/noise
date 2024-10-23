@@ -1220,8 +1220,8 @@ class GAN(pl.LightningModule):
 
         # how well can it label as real?
         valid = torch.ones(B, 1, device=clean_waveforms.device)
-        d_valid = self.discriminator(clean_waveforms)
-        real_loss = self.adversarial_loss(d_valid, valid)
+        d_real = self.discriminator(clean_waveforms)
+        real_loss = self.adversarial_loss(d_real, valid)
 
         # how well can it label as fake?
         fake = torch.zeros(B, 1, device=clean_waveforms.device)
