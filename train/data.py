@@ -74,8 +74,7 @@ class NoiseDataModule(pl.LightningDataModule):
             new_noisy_path = data_dir / "noisy" / f"noisy_{fileid}.wav"
             noisy_path.rename(new_noisy_path)
             files.append((new_noisy_path, clean_path))
-        random.shuffle(files)
-        return files[: self.hparams.num_samples]
+        return files
 
     def prepare_data(self) -> None:
         """Data operation to perform only on main process."""
@@ -112,10 +111,12 @@ class NoiseDataModule(pl.LightningDataModule):
         self.val_files = self.get_files(data_dir / "val")
 
         if stage == "fit":
-            self.trainset = NoiseDataset(self.train_files, self.train_transforms)
+            self.trainset = NoiseDataset(
+                self.train_files, self.hparams.num_samples, self.train_transforms
+            )
             # self.valset = NoiseDataset(self.val_files, self.val_transforms)
         elif stage == "predict":
-            self.valset = NoiseDataset(self.val_files, self.val_transforms)
+            self.valset = NoiseDataset(self.val_files, 1000, self.val_transforms)
         else:
             raise ValueError(f"Stage {stage} is not supported.")
 
@@ -141,19 +142,21 @@ class NoiseDataModule(pl.LightningDataModule):
 
 
 class NoiseDataset(Dataset):
-    def __init__(self, files: list[tuple[Path, Path | None]], transform: Transform):
+    def __init__(
+        self,
+        files: list[tuple[Path, Path | None]],
+        num_samples: int,
+        transforms: Transform,
+    ):
         super().__init__()
         self.files = files
-        self.data = list(
-            map(
-                lambda paths: (*transform(paths[0], paths[1]), paths[1].stem[6:]),
-                self.files,
-            )
-        )
+        self.num_samples = num_samples
+        self.transforms = transforms
 
     def __len__(self) -> int:
-        return len(self.files)
+        return self.num_samples
 
     def __getitem__(self, index: int) -> Dict[str, Tensor]:
-        noisy_waveform, clean_waveform, id = self.data[index]
-        return noisy_waveform, clean_waveform, id
+        paths = random.choice(self.files)
+        noisy_waveform, clean_waveform = self.transforms(paths[0], paths[1])
+        return noisy_waveform, clean_waveform, paths[1].stem[6:]

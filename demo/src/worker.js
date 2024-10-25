@@ -2,17 +2,12 @@ import * as ort from "onnxruntime-web/webgpu";
 
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
-const cutoff = 500;
 const maxSize = 300;
-const size = 30;
+const size = 50;
 
 // Returns a low-pass transform function for use with TransformStream.
 const noiseFilter = (session) => {
   const format = "f32-planar";
-  let lastValuePerChannel = 0;
-  const rc = 1.0 / (cutoff * 2 * Math.PI);
-  let dt;
-  let alpha;
   let frames;
   let offset = 0;
   let buffer;
@@ -21,8 +16,6 @@ const noiseFilter = (session) => {
   return async (data, controller) => {
     if (!frames) frames = data.numberOfFrames;
     if (!buffer) buffer = new Float32Array(frames * maxSize);
-    if (!dt) dt = 1.0 / data.sampleRate;
-    if (!alpha) alpha = dt / (rc + dt);
 
     // Extract audio data from input:
     const samples = buffer.subarray(
@@ -31,14 +24,6 @@ const noiseFilter = (session) => {
     );
     data.copyTo(samples, { planeIndex: 0, format });
     offset += 1;
-
-    // Apply low-pass filter to samples:
-    let lastValue = lastValuePerChannel;
-    for (let i = 0; i < samples.length; ++i) {
-      lastValue = lastValue + alpha * (samples[i] - lastValue);
-      samples[i] = lastValue;
-    }
-    lastValuePerChannel = lastValue;
 
     // Run audio processing:
     if (offset === size) {

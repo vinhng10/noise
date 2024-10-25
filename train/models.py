@@ -629,7 +629,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.LeakyReLU(0.01, inplace=True),
+            nn.ReLU(inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -637,7 +637,7 @@ class DepthwiseSeparableConv(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(0.01, inplace=True),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
@@ -670,7 +670,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(in_channels),
-            nn.LeakyReLU(0.01, inplace=True),
+            nn.ReLU(inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -678,7 +678,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 bias=bias,
             ),
             # nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(0.01, inplace=True) if not is_output else nn.Identity(),
+            nn.ReLU(inplace=True) if not is_output else nn.Identity(),
         )
 
     def forward(self, x):
@@ -797,7 +797,7 @@ class MobileNetV1(nn.Module):
                         padding=(0, padding),
                         bias=bias,
                     ),
-                    nn.LeakyReLU(0.01, inplace=True),
+                    nn.ReLU(inplace=True),
                 )
             ]
         )
@@ -845,7 +845,7 @@ class MobileNetV1(nn.Module):
             d_k=hidden_channels // nhead,
             d_v=hidden_channels // nhead,
             d_model=hidden_channels,
-            d_inner=hidden_channels * 2,
+            d_inner=hidden_channels,
             dropout=dropout,
             n_position=0,
             scale_emb=False,
@@ -854,22 +854,187 @@ class MobileNetV1(nn.Module):
     def forward(self, waveforms):
         x = torchaudio.functional.resample(
             waveforms,
-            self.hparams.src_sampling_rate,
-            self.hparams.tgt_sampling_rate,
+            self.src_sampling_rate,
+            self.tgt_sampling_rate,
         )
 
         x = self._forward(x)
 
         x = torchaudio.functional.resample(
             x,
-            self.hparams.tgt_sampling_rate,
-            self.hparams.src_sampling_rate,
+            self.tgt_sampling_rate,
+            self.src_sampling_rate,
         )
         return x
 
     def _forward(self, x):
         L = x.shape[-1]
         std = x.std(dim=-1, keepdim=True) + 1e-3
+        x = x / std
+        x = padding(x, self.encoder_n_layers + 1, self.kernel_size, self.stride)
+
+        # encoder
+        downs = []
+        for downsampling_block in self.encoder:
+            x = downsampling_block(x)
+            downs.append(x)
+        downs = downs[::-1]
+
+        x = x.squeeze(2).permute(0, 2, 1)
+        x = self.bottleneck_attention(x, None)
+        x = x.permute(0, 2, 1).unsqueeze(2)
+
+        # decoder
+        ups = []
+        for i, upsampling_block in enumerate(self.decoder):
+            ups.append(x)
+            skip_i = downs[i]
+            x = x + skip_i[:, :, :, : x.shape[-1]]
+            x = upsampling_block(x)
+
+        x = x[:, :, :, :L] * std
+        return x
+
+
+class MobileNetV1Orig(Model):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        encoder_n_layers: int,
+        nhead: int,
+        num_layers: int,
+        dropout: float,
+        bias: bool,
+        src_sampling_rate: int,
+        tgt_sampling_rate: int,
+        mr_stft_lambda: float,
+        fft_sizes: List[int],
+        hop_lengths: List[int],
+        win_lengths: List[int],
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.encoder_n_layers = encoder_n_layers
+        self.src_sampling_rate = src_sampling_rate
+        self.tgt_sampling_rate = tgt_sampling_rate
+
+        # encoder and decoder
+        self.encoder = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        hidden_channels,
+                        kernel_size=(1, kernel_size),
+                        stride=(1, stride),
+                        padding=(0, padding),
+                        bias=bias,
+                    ),
+                    nn.ReLU(inplace=True),
+                )
+            ]
+        )
+        self.decoder = nn.ModuleList(
+            [
+                nn.ConvTranspose2d(
+                    hidden_channels,
+                    out_channels,
+                    kernel_size=(1, kernel_size),
+                    stride=(1, stride),
+                    padding=(0, padding),
+                    output_padding=(0, 0),
+                    bias=bias,
+                )
+            ]
+        )
+
+        for i in range(encoder_n_layers):
+            in_channels = hidden_channels
+            out_channels = hidden_channels
+            hidden_channels = min(hidden_channels * 2, max_channels)
+            self.encoder.append(
+                DepthwiseSeparableConv(
+                    in_channels, hidden_channels, kernel_size, stride, padding, bias
+                )
+            )
+            self.decoder.insert(
+                0,
+                DepthwiseSeparableConvTranspose(
+                    hidden_channels,
+                    out_channels,
+                    kernel_size,
+                    stride,
+                    padding,
+                    0,
+                    bias,
+                    i == 0,
+                ),
+            )
+
+        self.bottleneck_attention = TransformerEncoder(
+            d_word_vec=hidden_channels,
+            n_layers=num_layers,
+            n_head=nhead,
+            d_k=hidden_channels // nhead,
+            d_v=hidden_channels // nhead,
+            d_model=hidden_channels,
+            d_inner=hidden_channels,
+            dropout=dropout,
+            n_position=0,
+            scale_emb=False,
+        )
+
+    def forward(self, waveforms):
+        x = torchaudio.functional.resample(
+            waveforms,
+            self.src_sampling_rate,
+            self.tgt_sampling_rate,
+        )
+
+        x = self._forward(x)
+        x = self.lowpass_filter(x[:, :, 0, :], 800, self.src_sampling_rate)
+
+        x = torchaudio.functional.resample(
+            x,
+            self.tgt_sampling_rate,
+            self.src_sampling_rate,
+        )
+        return x
+
+    def lowpass_filter(
+        self, audio: torch.Tensor, cutoff_freq: float, sample_rate: int, num_taps=101
+    ) -> torch.Tensor:
+        normalized_cutoff = 2 * cutoff_freq / sample_rate
+
+        # Create the low-pass filter using a windowed sinc function
+        # h[n] = (sin(2 * pi * cutoff * n / sample_rate) / (pi * n)) * window
+        n = torch.arange(num_taps) - (num_taps - 1) / 2  # Create a symmetric range
+        h = torch.sinc(2 * normalized_cutoff * n)
+        h *= torch.hamming_window(num_taps)  # Apply a Hamming window
+
+        # Normalize the filter coefficients
+        h /= torch.sum(h)
+
+        # Apply the filter to the audio signal using convolution
+        filtered_signal = F.conv1d(
+            audio,  # Add batch dimension
+            h.unsqueeze(0).unsqueeze(0),  # Add input and output channel dimensions
+            padding=num_taps // 2,  # Zero padding to maintain output size
+        )
+
+        return filtered_signal.unsqueeze(2)
+
+    def _forward(self, x):
+        L = x.shape[-1]
+        std = x.std(dim=-1, keepdim=True)
         x = x / std
         x = padding(x, self.encoder_n_layers + 1, self.kernel_size, self.stride)
 
@@ -920,7 +1085,7 @@ class Discriminator(nn.Module):
                         padding=(0, padding),
                         bias=bias,
                     ),
-                    nn.LeakyReLU(0.01, inplace=True),
+                    nn.ReLU(inplace=True),
                 )
             ]
         )
