@@ -114,9 +114,9 @@ class NoiseDataModule(pl.LightningDataModule):
             self.trainset = NoiseDataset(
                 self.train_files, self.hparams.num_samples, self.train_transforms
             )
-            # self.valset = NoiseDataset(self.val_files, self.val_transforms)
+            self.valset = NoiseDataset(self.val_files, -1, self.val_transforms)
         elif stage == "predict":
-            self.valset = NoiseDataset(self.val_files, 1000, self.val_transforms)
+            self.valset = NoiseDataset(self.val_files, -1, self.val_transforms)
         else:
             raise ValueError(f"Stage {stage} is not supported.")
 
@@ -130,15 +130,15 @@ class NoiseDataModule(pl.LightningDataModule):
             persistent_workers=True,
         )
 
-    # def val_dataloader(self) -> DataLoader:
-    #     return DataLoader(
-    #         self.valset,
-    #         shuffle=False,
-    #         num_workers=self.hparams.num_workers,
-    #         batch_size=self.hparams.batch_size,
-    #         pin_memory=True,
-    #         persistent_workers=True,
-    #     )
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.valset,
+            shuffle=False,
+            num_workers=self.hparams.num_workers,
+            batch_size=self.hparams.batch_size,
+            pin_memory=True,
+            persistent_workers=True,
+        )
 
 
 class NoiseDataset(Dataset):
@@ -154,9 +154,9 @@ class NoiseDataset(Dataset):
         self.transforms = transforms
 
     def __len__(self) -> int:
-        return self.num_samples
+        return self.num_samples if self.num_samples > 0 else len(self.files)
 
     def __getitem__(self, index: int) -> Dict[str, Tensor]:
-        paths = random.choice(self.files)
+        paths = random.choice(self.files) if self.num_samples > 0 else self.files[index]
         noisy_waveform, clean_waveform = self.transforms(paths[0], paths[1])
         return noisy_waveform, clean_waveform, paths[1].stem[6:]

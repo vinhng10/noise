@@ -21,8 +21,8 @@ fit:
       - class_path: lightning.pytorch.callbacks.ModelCheckpoint
         init_args:
           dirpath: null
-          filename: "{epoch}-{train_loss:.3f}"
-          monitor: train_loss
+          filename: "{epoch}-{val_loss:.3f}"
+          monitor: val_loss
           verbose: false
           save_last: true
           save_top_k: 3
@@ -95,7 +95,7 @@ fit:
     length: 0
     num_samples: 5000
     num_workers: 4
-    batch_size: 16
+    batch_size: 64
   optimizer:
     lr: 2e-4
     betas:

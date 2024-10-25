@@ -1297,7 +1297,7 @@ class LightningMobileNetV1(Model):
     def forward(self, x):
         return self.model(x)
 
-    def training_step(self, batch, batch_idx):
+    def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
         enhanced_waveforms = self.model._forward(noisy_waveforms)
         l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
@@ -1307,9 +1307,9 @@ class LightningMobileNetV1(Model):
         loss = l1_loss + mrstft_loss
         self.log_dict(
             {
-                "train_loss": loss,
-                "train_l1_loss": l1_loss,
-                "train_mrstft_loss": mrstft_loss,
+                f"{stage}_loss": loss,
+                f"{stage}_l1_loss": l1_loss,
+                f"{stage}_mrstft_loss": mrstft_loss,
             },
             on_step=False,
             on_epoch=True,
@@ -1318,3 +1318,9 @@ class LightningMobileNetV1(Model):
             sync_dist=True,
         )
         return loss
+
+    def training_step(self, batch, batch_idx):
+        return self._shared_step(batch, batch_idx, "train")
+    
+    def validation_step(self, batch, batch_idx):
+        return self._shared_step(batch, batch_idx, "val")
