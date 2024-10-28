@@ -9,6 +9,7 @@ from models import LightningMobileNetV1
 
 
 def finetune(model, step):
+    model.train()
     model.configure_optimizers = lambda: torch.optim.AdamW(
         model.parameters(), lr=1e-5, weight_decay=0.02
     )
@@ -52,7 +53,6 @@ checkpoint["state_dict"] = {
 checkpoint["hyper_parameters"].pop("_instantiator")
 model = LightningMobileNetV1(**checkpoint["hyper_parameters"])
 model.load_state_dict(state_dict=checkpoint["state_dict"])
-model
 
 # Importance criteria
 noisy_waveforms, clean_waveforms, _ = next(iter(val_dataloader))
