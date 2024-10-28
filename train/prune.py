@@ -26,7 +26,7 @@ def finetune(model, step):
                 mode="min",
                 save_top_k=1,
             ),
-            EarlyStopping(monitor="val_loss", mode="min", patience=50),
+            EarlyStopping(monitor="val_loss", mode="min", patience=10),
         ],
     )
     trainer.fit(model, datamodule=data_module)
