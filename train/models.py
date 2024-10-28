@@ -406,9 +406,9 @@ class OriginalCleanUNet(nn.Module):
 class Model(pl.LightningModule):
     SUPPORTED_SAMPLING_RATE = 16000
 
-    def training_step(self, batch, batch_idx):
+    def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
-        enhanced_waveforms = self.forward(noisy_waveforms)
+        enhanced_waveforms = self.model._forward(noisy_waveforms)
         l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
         mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
             enhanced_waveforms, clean_waveforms
@@ -416,16 +416,23 @@ class Model(pl.LightningModule):
         loss = l1_loss + mrstft_loss
         self.log_dict(
             {
-                "train_loss": loss,
-                "train_l1_loss": l1_loss,
-                "train_mrstft_loss": mrstft_loss,
+                f"{stage}_loss": loss,
+                f"{stage}_l1_loss": l1_loss,
+                f"{stage}_mrstft_loss": mrstft_loss,
             },
             on_step=False,
             on_epoch=True,
             prog_bar=True,
             logger=True,
+            sync_dist=True,
         )
         return loss
+
+    def training_step(self, batch, batch_idx):
+        return self._shared_step(batch, batch_idx, "train")
+
+    def validation_step(self, batch, batch_idx):
+        return self._shared_step(batch, batch_idx, "val")
 
     def stft_mag(self, input, fft_size, hop_length, win_length):
         x_stft = torch.stft(
@@ -896,147 +903,6 @@ class MobileNetV1(nn.Module):
         return x
 
 
-class MobileNetV1Orig(Model):
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        max_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
-        encoder_n_layers: int,
-        nhead: int,
-        num_layers: int,
-        dropout: float,
-        bias: bool,
-        src_sampling_rate: int,
-        tgt_sampling_rate: int,
-        mr_stft_lambda: float,
-        fft_sizes: List[int],
-        hop_lengths: List[int],
-        win_lengths: List[int],
-    ) -> None:
-        super().__init__()
-        self.save_hyperparameters()
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.encoder_n_layers = encoder_n_layers
-        self.src_sampling_rate = src_sampling_rate
-        self.tgt_sampling_rate = tgt_sampling_rate
-
-        # encoder and decoder
-        self.encoder = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Conv2d(
-                        in_channels,
-                        hidden_channels,
-                        kernel_size=(1, kernel_size),
-                        stride=(1, stride),
-                        padding=(0, padding),
-                        bias=bias,
-                    ),
-                    nn.ReLU(inplace=True),
-                )
-            ]
-        )
-        self.decoder = nn.ModuleList(
-            [
-                nn.ConvTranspose2d(
-                    hidden_channels,
-                    out_channels,
-                    kernel_size=(1, kernel_size),
-                    stride=(1, stride),
-                    padding=(0, padding),
-                    output_padding=(0, 0),
-                    bias=bias,
-                )
-            ]
-        )
-
-        for i in range(encoder_n_layers):
-            in_channels = hidden_channels
-            out_channels = hidden_channels
-            hidden_channels = min(hidden_channels * 2, max_channels)
-            self.encoder.append(
-                DepthwiseSeparableConv(
-                    in_channels, hidden_channels, kernel_size, stride, padding, bias
-                )
-            )
-            self.decoder.insert(
-                0,
-                DepthwiseSeparableConvTranspose(
-                    hidden_channels,
-                    out_channels,
-                    kernel_size,
-                    stride,
-                    padding,
-                    0,
-                    bias,
-                    i == 0,
-                ),
-            )
-
-        self.bottleneck_attention = TransformerEncoder(
-            d_word_vec=hidden_channels,
-            n_layers=num_layers,
-            n_head=nhead,
-            d_k=hidden_channels // nhead,
-            d_v=hidden_channels // nhead,
-            d_model=hidden_channels,
-            d_inner=hidden_channels,
-            dropout=dropout,
-            n_position=0,
-            scale_emb=False,
-        )
-
-    def forward(self, waveforms):
-        x = torchaudio.functional.resample(
-            waveforms,
-            self.src_sampling_rate,
-            self.tgt_sampling_rate,
-        )
-
-        x = self._forward(x)
-
-        x = torchaudio.functional.resample(
-            x,
-            self.tgt_sampling_rate,
-            self.src_sampling_rate,
-        )
-        return x
-    
-    def _forward(self, x):
-        L = x.shape[-1]
-        std = x.std(dim=-1, keepdim=True)
-        x = x / std
-        x = padding(x, self.encoder_n_layers + 1, self.kernel_size, self.stride)
-
-        # encoder
-        downs = []
-        for downsampling_block in self.encoder:
-            x = downsampling_block(x)
-            downs.append(x)
-        downs = downs[::-1]
-
-        x = x.squeeze(2).permute(0, 2, 1)
-        x = self.bottleneck_attention(x, None)
-        x = x.permute(0, 2, 1).unsqueeze(2)
-
-        # decoder
-        ups = []
-        for i, upsampling_block in enumerate(self.decoder):
-            ups.append(x)
-            skip_i = downs[i]
-            x = x + skip_i[:, :, :, : x.shape[-1]]
-            x = upsampling_block(x)
-
-        x = x[:, :, :, :L] * std
-        return x
-
-
 class Discriminator(nn.Module):
     def __init__(
         self,
@@ -1251,7 +1117,7 @@ class LightningMobileNetV1(Model):
         hop_lengths: List[int],
         win_lengths: List[int],
     ) -> None:
-        Model.__init__(self)
+        super().__init__()
         self.save_hyperparameters()
         self.model = MobileNetV1(
             in_channels,
@@ -1272,31 +1138,3 @@ class LightningMobileNetV1(Model):
 
     def forward(self, x):
         return self.model(x)
-
-    def _shared_step(self, batch, batch_idx, stage):
-        noisy_waveforms, clean_waveforms, _ = batch
-        enhanced_waveforms = self.model._forward(noisy_waveforms)
-        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
-        mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
-            enhanced_waveforms, clean_waveforms
-        )
-        loss = l1_loss + mrstft_loss
-        self.log_dict(
-            {
-                f"{stage}_loss": loss,
-                f"{stage}_l1_loss": l1_loss,
-                f"{stage}_mrstft_loss": mrstft_loss,
-            },
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        return self._shared_step(batch, batch_idx, "train")
-    
-    def validation_step(self, batch, batch_idx):
-        return self._shared_step(batch, batch_idx, "val")
