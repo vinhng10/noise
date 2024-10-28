@@ -12,7 +12,7 @@ fit:
       init_args:
         save_dir: ./logs
         name: null
-        version: mobilenetv1-2.2.0
+        version: mobilenetv1-2.2.2
         log_graph: false
         default_hp_metric: false
         prefix: ""
@@ -73,10 +73,10 @@ fit:
   model:
     in_channels: 1
     hidden_channels: 32
-    max_channels: 256
+    max_channels: 128
     out_channels: 1
-    kernel_size: 8
-    stride: 4
+    kernel_size: 4
+    stride: 3
     padding: 0
     encoder_n_layers: 4
     nhead: 8

@@ -149,14 +149,18 @@ class NoiseDataset(Dataset):
         transforms: Transform,
     ):
         super().__init__()
-        self.files = files
+        random.shuffle(files)
+        if num_samples > 0:
+            self.files = files[:num_samples]
+        else:
+            self.files = files
         self.num_samples = num_samples
         self.transforms = transforms
 
     def __len__(self) -> int:
-        return self.num_samples if self.num_samples > 0 else len(self.files)
+        return len(self.files)
 
     def __getitem__(self, index: int) -> Dict[str, Tensor]:
-        paths = random.choice(self.files) if self.num_samples > 0 else self.files[index]
+        paths = self.files[index]
         noisy_waveform, clean_waveform = self.transforms(paths[0], paths[1])
         return noisy_waveform, clean_waveform, paths[1].stem[6:]

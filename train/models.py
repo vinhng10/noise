@@ -1000,7 +1000,6 @@ class MobileNetV1Orig(Model):
         )
 
         x = self._forward(x)
-        x = self.lowpass_filter(x[:, :, 0, :], 800, self.src_sampling_rate)
 
         x = torchaudio.functional.resample(
             x,
@@ -1008,30 +1007,7 @@ class MobileNetV1Orig(Model):
             self.src_sampling_rate,
         )
         return x
-
-    def lowpass_filter(
-        self, audio: torch.Tensor, cutoff_freq: float, sample_rate: int, num_taps=101
-    ) -> torch.Tensor:
-        normalized_cutoff = 2 * cutoff_freq / sample_rate
-
-        # Create the low-pass filter using a windowed sinc function
-        # h[n] = (sin(2 * pi * cutoff * n / sample_rate) / (pi * n)) * window
-        n = torch.arange(num_taps) - (num_taps - 1) / 2  # Create a symmetric range
-        h = torch.sinc(2 * normalized_cutoff * n)
-        h *= torch.hamming_window(num_taps)  # Apply a Hamming window
-
-        # Normalize the filter coefficients
-        h /= torch.sum(h)
-
-        # Apply the filter to the audio signal using convolution
-        filtered_signal = F.conv1d(
-            audio,  # Add batch dimension
-            h.unsqueeze(0).unsqueeze(0),  # Add input and output channel dimensions
-            padding=num_taps // 2,  # Zero padding to maintain output size
-        )
-
-        return filtered_signal.unsqueeze(2)
-
+    
     def _forward(self, x):
         L = x.shape[-1]
         std = x.std(dim=-1, keepdim=True)
