@@ -32,18 +32,18 @@ def finetune(model, step):
 
 
 data_module = NoiseDataModule(
-    data_dir="./data-debug",
+    data_dir="./data",
     sampling_rate=16000,
     length=0,
     num_samples=5000,
     num_workers=4,
-    batch_size=32,
+    batch_size=16,
 )
 data_module.setup(stage="fit")
 val_dataloader = data_module.val_dataloader()
 
 checkpoint = torch.load(
-    "./logs/mobilenetv1-2.0.0/checkpoints/epoch=829-train_loss=1.064.ckpt",
+    "./logs/mobilenetv1-2.0.0/checkpoints/epoch=3907-train_loss=0.860.ckpt",
     map_location=torch.device("cpu"),
 )
 checkpoint["state_dict"] = {
@@ -61,13 +61,15 @@ imp = tp.importance.TaylorImportance()
 ignored_layers = [model.model.bottleneck_attention]
 
 iterative_steps = 5  # progressive pruning
-pruner = tp.pruner.MagnitudePruner(
+pruner = tp.pruner.MetaPruner(
     model,
     noisy_waveforms,
     importance=imp,
     iterative_steps=iterative_steps,
     pruning_ratio=0.5,
     ignored_layers=ignored_layers,
+    global_pruning=True,
+    isomorphic=True,
 )
 
 base_macs, base_nparams = tp.utils.count_ops_and_params(model, noisy_waveforms)
