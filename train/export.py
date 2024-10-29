@@ -3,7 +3,12 @@ import onnx
 from models import *
 from data import NoiseDataModule
 from onnxconverter_common import float16
-from onnxruntime.quantization import quantize_static, QuantType
+from onnxruntime.quantization import (
+    quantize_static,
+    quantize_dynamic,
+    QuantType,
+    QuantFormat,
+)
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 from onnxruntime.quantization.shape_inference import quant_pre_process
 
@@ -12,6 +17,7 @@ class DataReader(CalibrationDataReader):
     def __init__(self):
         self.data_module = NoiseDataModule(
             data_dir="data-debug",
+            sampling_rate=48000,
             length=0,
             num_workers=1,
             batch_size=1,
@@ -31,69 +37,48 @@ class DataReader(CalibrationDataReader):
 
 
 if __name__ == "__main__":
-    # model = MobileNetV1(
-    #     in_channels=1,
-    #     hidden_channels=32,
-    #     out_channels=1,
-    #     encoder_n_layers=4,
-    #     nhead=4,
-    #     dim_feedforward=256,
-    #     num_layers=2,
-    #     dropout=0.0,
-    #     bias=False,
-    #     mr_stft_lambda=0.5,
-    #     fft_sizes=[512, 1024, 2048],
-    #     hop_lengths=[50, 120, 240],
-    #     win_lengths=[240, 600, 1200],
+    # checkpoint = torch.load(
+    #     "./logs/mobilenetv1-2.0.0/checkpoints/epoch=829-train_loss=1.064.ckpt",
+    #     map_location=torch.device("cpu"),
     # )
-
-    checkpoint = torch.load(
-        "./logs/kd-1.0.0/checkpoints/epoch=3141-train_loss=0.468.ckpt",
-        map_location=torch.device("cpu"),
-    )
-    student_weights = {
-        k.removeprefix("student."): v
-        for k, v in checkpoint["state_dict"].items()
-        if k.startswith("student.")
-    }
+    # checkpoint["state_dict"] = {
+    #     f"model.{k}": v for k, v in checkpoint["state_dict"].items()
+    # }
+    # checkpoint["hyper_parameters"].pop("_instantiator")
+    # model = LightningMobileNetV1(
+    #     **checkpoint["hyper_parameters"],
+    # )
+    # model.load_state_dict(state_dict=checkpoint["state_dict"])
 
     model = MobileNetV1(
-        **checkpoint["hyper_parameters"]["student"],
-        mr_stft_lambda=0,
-        fft_sizes=[],
-        hop_lengths=[],
-        win_lengths=[]
+        in_channels=1,
+        hidden_channels=32,
+        max_channels=256,
+        out_channels=1,
+        kernel_size=3,
+        stride=2,
+        padding=0,
+        encoder_n_layers=4,
+        nhead=8,
+        num_layers=1,
+        dropout=0.0,
+        bias=False,
+        src_sampling_rate=48000,
+        tgt_sampling_rate=16000,
     )
-    model.load_state_dict(student_weights)
-    model.eval()
-    print(model)
+    model = model.eval()
 
-    # model = CleanUNet.load_from_checkpoint(
-    #     "./logs/model-1.0.1/checkpoints/epoch=9850-train_loss=1.104.ckpt"
-    # ).eval()
-    model.to_onnx(
-        "/workspaces/noise/demo/src/app/model.onnx",
-        torch.randn((1, 1, 1, 4096)),
+    torch.onnx.export(
+        model,
+        torch.randn((1, 1, 1, 48000)),
+        "/workspaces/noise/demo/src/model.onnx",
         export_params=True,
         do_constant_folding=True,
         input_names=["input"],
         output_names=["output"],
     )
-    # model = onnx.load("fp32-model.onnx")
-    # model_fp16 = float16.convert_float_to_float16(model, keep_io_types=True)
-    # onnx.save(model_fp16, "/workspaces/noise/demo/src/app/model.onnx")
 
-    # quant_pre_process(
-    #     input_model="fp32-model.onnx",
-    #     output_model_path="prep-model.onnx"
-    # )
-
-    # quantize_static(
+    # quantize_dynamic(
     #     "fp32-model.onnx",
-    #     "/workspaces/noise/demo/src/app/model.onnx",
-    #     calibration_data_reader=DataReader(),
-    #     quant_format="QDQ",
-    #     activation_type=QuantType.QInt8,
-    #     weight_type=QuantType.QInt8,
-    #     extra_options={"ActivationSymmetric": True, "WeightSymmetric": True},
+    #     "/workspaces/noise/demo/src/model.onnx",
     # )
