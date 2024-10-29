@@ -16,9 +16,10 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class Transform:
-    def __init__(self, sampling_rate: int, length: int) -> None:
+    def __init__(self, sampling_rate: int, length: int, is_val: bool = False) -> None:
         self.sampling_rate = sampling_rate
         self.length = length
+        self.is_val = is_val
 
     def __call__(self, noisy_path, clean_path) -> tuple[Tensor, int]:
         noisy_waveform, noisy_orig_sr = torchaudio.load(str(noisy_path))
@@ -39,9 +40,14 @@ class Transform:
             clean_waveform = torch.empty_like(noisy_waveform)
 
         if self.length > 0:
-            offset = np.random.randint(
-                0, max(noisy_waveform.shape[-1] - self.length, 1)
-            )
+            if self.is_val:
+                # Take segment from the middle for validation
+                offset = max((noisy_waveform.shape[-1] - self.length) // 2, 0)
+            else:
+                # Take a random segment for training
+                offset = np.random.randint(
+                    0, max(noisy_waveform.shape[-1] - self.length, 1)
+                )
             noisy_waveform = noisy_waveform[:, :, offset : offset + self.length]
             clean_waveform = clean_waveform[:, :, offset : offset + self.length]
 
@@ -61,8 +67,8 @@ class NoiseDataModule(pl.LightningDataModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.train_transforms = Transform(sampling_rate, length)
-        self.val_transforms = Transform(sampling_rate, length)
+        self.train_transforms = Transform(sampling_rate, length, False)
+        self.val_transforms = Transform(sampling_rate, length, True)
 
     def get_files(self, data_dir: str | PathLike) -> list[tuple[Path, Path | None]]:
         data_dir = Path(data_dir)

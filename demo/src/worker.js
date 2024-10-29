@@ -2,8 +2,8 @@ import * as ort from "onnxruntime-web/webgpu";
 
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
-const maxSize = 300;
-const size = 50;
+const maxSize = 100;
+const size = 20;
 
 // Returns a low-pass transform function for use with TransformStream.
 const noiseFilter = (session) => {
