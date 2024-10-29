@@ -86,4 +86,4 @@ for i in range(iterative_steps):
     pruner.step()
     macs, nparams = tp.utils.count_ops_and_params(model, noisy_waveforms)
     # finetune your model here
-    finetune(model, step=iterative_steps)
+    finetune(model, step=i)
