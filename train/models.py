@@ -633,7 +633,7 @@ class DepthwiseSeparableConv(nn.Module):
                 groups=in_channels,
                 bias=bias,
             ),
-            # nn.BatchNorm2d(in_channels),
+            nn.BatchNorm2d(in_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
@@ -641,7 +641,7 @@ class DepthwiseSeparableConv(nn.Module):
                 kernel_size=1,
                 bias=bias,
             ),
-            # nn.BatchNorm2d(out_channels),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         )
 
@@ -674,7 +674,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 groups=in_channels,
                 bias=bias,
             ),
-            # nn.BatchNorm2d(in_channels),
+            nn.BatchNorm2d(in_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(
                 in_channels=in_channels,
@@ -682,7 +682,7 @@ class DepthwiseSeparableConvTranspose(nn.Module):
                 kernel_size=1,
                 bias=bias,
             ),
-            # nn.BatchNorm2d(out_channels),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True) if not is_output else nn.Identity(),
         )
 
