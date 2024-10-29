@@ -33,7 +33,12 @@ const noiseFilter = (session) => {
         1,
         buffer.length,
       ]);
+
+      const startTime = performance.now(); // Start time
       const result = await session.run({ input: tensor });
+      const endTime = performance.now(); // End time
+      console.log(`session.run() took ${endTime - startTime} ms`);
+
       const output = result.output.data.subarray((maxSize - size) * frames);
       for (let i = 0; i < output.length; i += frames) {
         outputs.push(output.subarray(i, i + frames));
