@@ -233,7 +233,7 @@ def padding(x, D, K, S):
         L = (L - 1) * S + K
 
     L = int(L)
-    x = F.pad(x, (0, L - x.shape[-1]))
+    x = F.pad(x, (L - x.shape[-1], 0))
     return x
 
 
@@ -415,9 +415,7 @@ class Model(pl.LightningModule):
         )
         loss = l1_loss + mrstft_loss
         self.log_dict(
-            {
-                f"{stage}_loss": loss
-            },
+            {f"{stage}_loss": loss},
             on_step=False,
             on_epoch=True,
             prog_bar=True,
@@ -894,10 +892,10 @@ class MobileNetV1(nn.Module):
         for i, upsampling_block in enumerate(self.decoder):
             ups.append(x)
             skip_i = downs[i]
-            x = x + skip_i[:, :, :, : x.shape[-1]]
+            x = x + skip_i[:, :, :, -x.shape[-1] :]
             x = upsampling_block(x)
 
-        x = x[:, :, :, :L] * std
+        x = x[:, :, :, -L:] * std
         return x
 
 

@@ -12,7 +12,7 @@ fit:
       init_args:
         save_dir: ./logs
         name: null
-        version: mobilenetv1-2.3.0
+        version: mobilenetv1-2.4.0
         log_graph: false
         default_hp_metric: false
         prefix: ""
