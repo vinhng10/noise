@@ -1134,3 +1134,107 @@ class LightningMobileNetV1(Model):
 
     def forward(self, x):
         return self.model(x)
+
+
+class DilatedConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, bias):
+        super(DilatedConvBlock, self).__init__()
+        self.layer = nn.Sequential(
+            nn.ZeroPad2d((dilation * (kernel_size - 1), 0, 0, 0)),
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=[1, kernel_size],
+                dilation=[1, dilation],
+                bias=bias,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        x = self.layer(x)
+        return x
+
+
+class DilatedConvNet(Model):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        kernel_size: int,
+        bias: bool,
+        num_layers: int,
+        src_sampling_rate: int,
+        tgt_sampling_rate: int,
+        mr_stft_lambda: float,
+        fft_sizes: List[int],
+        hop_lengths: List[int],
+        win_lengths: List[int],
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+        self.src_sampling_rate = src_sampling_rate
+        self.tgt_sampling_rate = tgt_sampling_rate
+
+        layers = []
+        for i in range(num_layers):
+            dilation = 2**i  # Double dilation each layer
+            layers.append(
+                DilatedConvBlock(
+                    in_channels, hidden_channels, kernel_size, dilation, bias
+                )
+            )
+            in_channels = hidden_channels
+            hidden_channels = min(hidden_channels * 2, max_channels)
+
+        self.model = nn.Sequential(
+            *layers,
+            nn.Conv2d(
+                (
+                    hidden_channels
+                    if hidden_channels == max_channels
+                    else hidden_channels // 2
+                ),
+                1,
+                kernel_size=1,
+            ),
+        )
+
+    def forward(self, waveforms):
+        x = torchaudio.functional.resample(
+            waveforms,
+            self.src_sampling_rate,
+            self.tgt_sampling_rate,
+        )
+
+        x = self._forward(x)
+
+        x = torchaudio.functional.resample(
+            x,
+            self.tgt_sampling_rate,
+            self.src_sampling_rate,
+        )
+        return x
+
+    def _forward(self, x):
+        return self.model(x)
+
+    def _shared_step(self, batch, batch_idx, stage):
+        noisy_waveforms, clean_waveforms, _ = batch
+        enhanced_waveforms = self._forward(noisy_waveforms)
+        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+        mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
+            enhanced_waveforms, clean_waveforms
+        )
+        loss = l1_loss + mrstft_loss
+        self.log_dict(
+            {f"{stage}_loss": loss},
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+        return loss

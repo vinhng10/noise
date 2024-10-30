@@ -15,7 +15,7 @@ class CLI(LightningCLI):
 
 def cli_main():
     cli = CLI(
-        LightningMobileNetV1,
+        DilatedConvNet,
         NoiseDataModule,
         save_config_kwargs={"overwrite": True},
         parser_kwargs={"parser_mode": "yaml"},
