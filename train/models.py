@@ -841,18 +841,18 @@ class MobileNetV1(nn.Module):
                 ),
             )
 
-        self.bottleneck_attention = TransformerEncoder(
-            d_word_vec=hidden_channels,
-            n_layers=num_layers,
-            n_head=nhead,
-            d_k=hidden_channels // nhead,
-            d_v=hidden_channels // nhead,
-            d_model=hidden_channels,
-            d_inner=hidden_channels,
-            dropout=dropout,
-            n_position=0,
-            scale_emb=False,
-        )
+        # self.bottleneck_attention = TransformerEncoder(
+        #     d_word_vec=hidden_channels,
+        #     n_layers=num_layers,
+        #     n_head=nhead,
+        #     d_k=hidden_channels // nhead,
+        #     d_v=hidden_channels // nhead,
+        #     d_model=hidden_channels,
+        #     d_inner=hidden_channels,
+        #     dropout=dropout,
+        #     n_position=0,
+        #     scale_emb=False,
+        # )
 
     def forward(self, waveforms):
         x = torchaudio.functional.resample(
@@ -883,9 +883,9 @@ class MobileNetV1(nn.Module):
             downs.append(x)
         downs = downs[::-1]
 
-        x = x.squeeze(2).permute(0, 2, 1)
-        x = self.bottleneck_attention(x, None)
-        x = x.permute(0, 2, 1).unsqueeze(2)
+        # x = x.squeeze(2).permute(0, 2, 1)
+        # x = self.bottleneck_attention(x, None)
+        # x = x.permute(0, 2, 1).unsqueeze(2)
 
         # decoder
         ups = []
