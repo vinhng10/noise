@@ -3,6 +3,7 @@ import { useState, useRef, useEffect } from "react";
 
 function App() {
   const [isAudioOn, setIsAudioOn] = useState(false);
+  const [isNoiseReductionEnabled, setIsNoiseReductionEnabled] = useState(false);
   const stream = useRef(null);
   const processor = useRef(null);
   const generator = useRef(null);
@@ -112,32 +113,50 @@ function App() {
         console.log("Stream ended");
       };
 
-      processor.current = new MediaStreamTrackProcessor(track);
-      generator.current = new MediaStreamTrackGenerator("audio");
-      const source = processor.current.readable;
-      const sink = generator.current.writable;
-      worker.current = new Worker(new URL("./worker.js", import.meta.url), {
-        type: "module",
-      });
-      worker.current.postMessage({ source: source, sink: sink }, [
-        source,
-        sink,
-      ]);
-
-      processedStream.current = new MediaStream();
-      processedStream.current.addTrack(generator.current);
-
       audioContext.current = new AudioContext();
       const sourceNode = audioContext.current.createMediaStreamSource(
-        processedStream.current
+        stream.current
       );
 
       // Create Analyser Node
       analyser.current = audioContext.current.createAnalyser();
-      analyser.current.fftSize = 2048; // Adjusted for both frequency and time domain
+      analyser.current.fftSize = 2048;
 
-      // Connect nodes
-      sourceNode.connect(analyser.current);
+      const filterNode = audioContext.current.createBiquadFilter();
+      filterNode.type = "bandpass";
+      filterNode.frequency.value = 2500; // Center frequency
+      filterNode.Q.value = 5; // Quality factor to narrow the range
+
+      const gainNode = audioContext.current.createGain();
+      gainNode.gain.value = 1;
+
+      if (isNoiseReductionEnabled) {
+        processor.current = new MediaStreamTrackProcessor(track);
+        generator.current = new MediaStreamTrackGenerator("audio");
+        const source = processor.current.readable;
+        const sink = generator.current.writable;
+        worker.current = new Worker(new URL("./worker.js", import.meta.url), {
+          type: "module",
+        });
+        worker.current.postMessage({ source: source, sink: sink }, [
+          source,
+          sink,
+        ]);
+
+        processedStream.current = new MediaStream();
+        processedStream.current.addTrack(generator.current);
+
+        const processedSourceNode =
+          audioContext.current.createMediaStreamSource(processedStream.current);
+        processedSourceNode.connect(filterNode);
+        filterNode.connect(gainNode);
+        gainNode.connect(analyser.current);
+      } else {
+        sourceNode.connect(filterNode);
+        filterNode.connect(gainNode);
+        gainNode.connect(analyser.current);
+      }
+
       analyser.current.connect(audioContext.current.destination);
 
       // Start drawing both spectrogram and waveform
@@ -152,8 +171,10 @@ function App() {
   const stopAudio = async () => {
     setIsAudioOn(false);
     stream.current.getTracks().forEach((track) => track.stop());
-    worker.current.postMessage({ command: "abort" });
-    worker.current.terminate();
+    if (isNoiseReductionEnabled) {
+      worker.current.postMessage({ command: "abort" });
+      worker.current.terminate();
+    }
     audioContext.current.close();
 
     // Cancel the animation
@@ -188,6 +209,13 @@ function App() {
           >
             Stop
           </button>
+          <button
+            className="btn"
+            onClick={() => setIsNoiseReductionEnabled(!isNoiseReductionEnabled)}
+            disabled={isAudioOn}
+          >
+            Noise Reduction: {isNoiseReductionEnabled ? "ON" : "OFF"}
+          </button>
         </div>
         <div
           style={{
@@ -219,12 +247,3 @@ function App() {
 }
 
 export default App;
-
-// const filterNode = audioContext.current.createBiquadFilter();
-//       filterNode.type = "bandpass";
-//       filterNode.frequency.value = 250; // Center frequency
-//       filterNode.Q.value = 5; // Quality factor to narrow the range
-
-//       sourceNode.connect(filterNode);
-//       filterNode.connect(analyser.current);
-//       analyser.current.connect(audioContext.current.destination);
