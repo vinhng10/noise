@@ -3,16 +3,30 @@ import boto3
 import torch
 import warnings
 import torchaudio
+import librosa
 import numpy as np
 import lightning.pytorch as pl
+from numpy.typing import NDArray
 from os import PathLike
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Union
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
+from audiomentations import *
+from audiomentations.core.transforms_interface import BaseWaveformTransform
 
 
 ################################################################################
+
+
+class ToTensor(BaseWaveformTransform):
+    def __init__(self, p: float = 1.0):
+        super().__init__(p)
+
+    def apply(
+        self, samples: NDArray[np.float32], sample_rate: int
+    ) -> torch.FloatTensor:
+        return torch.from_numpy(samples)[None, None, :].float()
 
 
 class Transform:
@@ -64,11 +78,49 @@ class NoiseDataModule(pl.LightningDataModule):
         num_samples: int = 120000,
         num_workers: int = 4,
         batch_size: int = 128,
+        p: float = 0.5,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.train_transforms = Transform(sampling_rate, length, False)
-        self.val_transforms = Transform(sampling_rate, length, True)
+        self.train_transforms = Compose(
+            [
+                Shift(rollover=False, p=p),
+                AddBackgroundNoise(
+                    sounds_path=f"{data_dir}/train/noise",
+                    min_snr_db=5.0,
+                    max_snr_db=40.0,
+                    noise_transform=Compose(
+                        [
+                            PolarityInversion(),
+                            PitchShift(min_semitones=-12, max_semitones=12),
+                        ]
+                    ),
+                    p=p,
+                ),
+                PolarityInversion(p=p),
+                BandPassFilter(
+                    min_center_freq=1000,
+                    max_center_freq=4000,
+                    min_bandwidth_fraction=1,
+                    max_bandwidth_fraction=1.99,
+                    p=p / 5,
+                ),
+                AddColorNoise(min_snr_db=10.0, max_snr_db=40.0, p=p),
+                RoomSimulator(
+                    min_absorption_value=0.075,
+                    max_absorption_value=0.4,
+                    leave_length_unchanged=True,
+                    p=p,
+                ),
+                BitCrush(
+                    min_bit_depth=8,
+                    max_bit_depth=12,
+                    p=p,
+                ),
+                ToTensor(),
+            ]
+        )
+        self.val_transforms = Compose([ToTensor()])
 
     def get_files(self, data_dir: str | PathLike) -> list[tuple[Path, Path | None]]:
         data_dir = Path(data_dir)
@@ -118,11 +170,18 @@ class NoiseDataModule(pl.LightningDataModule):
 
         if stage == "fit":
             self.trainset = NoiseDataset(
-                self.train_files, self.hparams.num_samples, self.train_transforms
+                self.train_files,
+                self.hparams.num_samples,
+                self.hparams.sampling_rate,
+                self.train_transforms,
             )
-            self.valset = NoiseDataset(self.val_files, -1, self.val_transforms)
+            self.valset = NoiseDataset(
+                self.val_files, -1, self.hparams.sampling_rate, self.val_transforms
+            )
         elif stage == "predict":
-            self.valset = NoiseDataset(self.val_files, -1, self.val_transforms)
+            self.valset = NoiseDataset(
+                self.val_files, -1, self.hparams.sampling_rate, self.val_transforms
+            )
         else:
             raise ValueError(f"Stage {stage} is not supported.")
 
@@ -152,6 +211,7 @@ class NoiseDataset(Dataset):
         self,
         files: list[tuple[Path, Path | None]],
         num_samples: int,
+        sampling_rate: int,
         transforms: Transform,
     ):
         super().__init__()
@@ -161,6 +221,7 @@ class NoiseDataset(Dataset):
         else:
             self.files = files
         self.num_samples = num_samples
+        self.sampling_rate = sampling_rate
         self.transforms = transforms
 
     def __len__(self) -> int:
@@ -168,5 +229,19 @@ class NoiseDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, Tensor]:
         paths = self.files[index]
-        noisy_waveform, clean_waveform = self.transforms(paths[0], paths[1])
+        noisy_waveform, _ = librosa.load(paths[0], sr=self.sampling_rate)
+        clean_waveform, _ = librosa.load(paths[1], sr=self.sampling_rate)
+
+        noisy_waveform = self.transforms(
+            samples=noisy_waveform, sample_rate=self.sampling_rate
+        )
+        self.transforms.freeze_parameters()
+        for t in self.transforms.transforms:
+            if t.__class__.__name__ not in ["Shift"]:
+                t.parameters["should_apply"] = False
+        clean_waveform = self.transforms(
+            samples=clean_waveform, sample_rate=self.sampling_rate
+        )
+        self.transforms.unfreeze_parameters()
+
         return noisy_waveform, clean_waveform, paths[1].stem[6:]

@@ -1,8 +1,10 @@
+audiomentations
 boto3
 torch
 librosa
 lightning
 tqdm
+pyroomacoustics
 pyyaml
 onnx
 onnxruntime
