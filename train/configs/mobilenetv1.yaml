@@ -113,7 +113,7 @@ fit:
   lr_scheduler:
     mode: min
     factor: 0.8
-    patience: 100
+    patience: 300
     min_lr: 2e-4
     monitor: val_loss
       
