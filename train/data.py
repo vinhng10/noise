@@ -74,7 +74,7 @@ class NoiseDataModule(pl.LightningDataModule):
         self.train_transforms = Compose(
             [
                 Cut(length=length, is_val=False, p=1.0),
-                Shift(min_shift=-1.0, max_shift=1.0, rollover=False, p=p),
+                Shift(min_shift=-0.5, max_shift=0.5, rollover=False, p=p),
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=5.0,
