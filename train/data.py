@@ -1,22 +1,50 @@
 import random
 import boto3
 import torch
-import warnings
-import torchaudio
 import librosa
 import numpy as np
 import lightning.pytorch as pl
 from numpy.typing import NDArray
 from os import PathLike
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 from audiomentations import *
 from audiomentations.core.transforms_interface import BaseWaveformTransform
+from audiomentations.core.composition import BaseCompose
 
 
 ################################################################################
+
+
+class Cut(BaseWaveformTransform):
+    def __init__(self, length: int, is_val: bool = False, p: float = 0.5):
+        super().__init__(p)
+        self.length = length
+        self.is_val = is_val
+
+    def randomize_parameters(self, samples: NDArray[np.float32], sample_rate: int):
+        super().randomize_parameters(samples, sample_rate)
+        if self.parameters["should_apply"]:
+            if self.is_val:
+                # Take segment from the middle for validation
+                self.parameters["offset"] = max((len(samples) - self.length) // 2, 0)
+            else:
+                # Take a random segment for training
+                self.parameters["offset"] = np.random.randint(
+                    0, max(len(samples) - self.length, 1)
+                )
+
+    def apply(
+        self, samples: NDArray[np.float32], sample_rate: int
+    ) -> NDArray[np.float32]:
+        if self.length > 0:
+            return samples[
+                self.parameters["offset"] : self.parameters["offset"] + self.length
+            ]
+        else:
+            return samples
 
 
 class ToTensor(BaseWaveformTransform):
@@ -27,45 +55,6 @@ class ToTensor(BaseWaveformTransform):
         self, samples: NDArray[np.float32], sample_rate: int
     ) -> torch.FloatTensor:
         return torch.from_numpy(samples)[None, None, :].float()
-
-
-class Transform:
-    def __init__(self, sampling_rate: int, length: int, is_val: bool = False) -> None:
-        self.sampling_rate = sampling_rate
-        self.length = length
-        self.is_val = is_val
-
-    def __call__(self, noisy_path, clean_path) -> tuple[Tensor, int]:
-        noisy_waveform, noisy_orig_sr = torchaudio.load(str(noisy_path))
-        noisy_waveform = torchaudio.functional.resample(
-            noisy_waveform, noisy_orig_sr, self.sampling_rate
-        )
-        noisy_waveform = torch.mean(noisy_waveform, dim=0, keepdim=True)
-        noisy_waveform = noisy_waveform.unsqueeze(0)
-
-        if clean_path is not None:
-            clean_waveform, clean_orig_sr = torchaudio.load(str(clean_path))
-            clean_waveform = torchaudio.functional.resample(
-                clean_waveform, clean_orig_sr, self.sampling_rate
-            )
-            clean_waveform = torch.mean(clean_waveform, dim=0, keepdim=True)
-            clean_waveform = clean_waveform.unsqueeze(0)
-        else:
-            clean_waveform = torch.empty_like(noisy_waveform)
-
-        if self.length > 0:
-            if self.is_val:
-                # Take segment from the middle for validation
-                offset = max((noisy_waveform.shape[-1] - self.length) // 2, 0)
-            else:
-                # Take a random segment for training
-                offset = np.random.randint(
-                    0, max(noisy_waveform.shape[-1] - self.length, 1)
-                )
-            noisy_waveform = noisy_waveform[:, :, offset : offset + self.length]
-            clean_waveform = clean_waveform[:, :, offset : offset + self.length]
-
-        return noisy_waveform, clean_waveform
 
 
 class NoiseDataModule(pl.LightningDataModule):
@@ -84,7 +73,8 @@ class NoiseDataModule(pl.LightningDataModule):
         self.save_hyperparameters()
         self.train_transforms = Compose(
             [
-                Shift(rollover=False, p=p),
+                Cut(length=length, is_val=False, p=1.0),
+                Shift(min_shift=-1.0, max_shift=1.0, rollover=False, p=p),
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=5.0,
@@ -117,10 +107,12 @@ class NoiseDataModule(pl.LightningDataModule):
                     max_bit_depth=12,
                     p=p,
                 ),
-                ToTensor(),
+                ToTensor(p=1.0),
             ]
         )
-        self.val_transforms = Compose([ToTensor()])
+        self.val_transforms = Compose(
+            [Cut(length=8000, is_val=True, p=1.0), ToTensor(p=1.0)]
+        )
 
     def get_files(self, data_dir: str | PathLike) -> list[tuple[Path, Path | None]]:
         data_dir = Path(data_dir)
@@ -212,7 +204,7 @@ class NoiseDataset(Dataset):
         files: list[tuple[Path, Path | None]],
         num_samples: int,
         sampling_rate: int,
-        transforms: Transform,
+        transforms: BaseCompose,
     ):
         super().__init__()
         random.shuffle(files)
@@ -237,7 +229,7 @@ class NoiseDataset(Dataset):
         )
         self.transforms.freeze_parameters()
         for t in self.transforms.transforms:
-            if t.__class__.__name__ not in ["Shift"]:
+            if t.__class__.__name__ not in ["Cut", "Shift", "ToTensor"]:
                 t.parameters["should_apply"] = False
         clean_waveform = self.transforms(
             samples=clean_waveform, sample_rate=self.sampling_rate
