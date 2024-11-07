@@ -78,7 +78,7 @@ fit:
     kernel_size: 3
     stride: 2
     padding: 0
-    encoder_n_layers: 4
+    encoder_n_layers: 5
     nhead: 4
     num_layers: 1
     dropout: 0.0
