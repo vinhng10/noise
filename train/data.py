@@ -79,12 +79,6 @@ class NoiseDataModule(pl.LightningDataModule):
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=5.0,
                     max_snr_db=40.0,
-                    noise_transform=Compose(
-                        [
-                            PolarityInversion(),
-                            PitchShift(min_semitones=-12, max_semitones=12),
-                        ]
-                    ),
                     p=p,
                 ),
                 PolarityInversion(p=p),
