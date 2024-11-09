@@ -1,4 +1,6 @@
+import functools
 import random
+import warnings
 import boto3
 import torch
 import librosa
@@ -7,12 +9,18 @@ import lightning.pytorch as pl
 from numpy.typing import NDArray
 from os import PathLike
 from pathlib import Path
-from typing import Dict
+from typing import Callable, Dict, List, Optional, Union
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 from audiomentations import *
+from audiomentations.core.audio_loading_utils import load_sound_file
 from audiomentations.core.transforms_interface import BaseWaveformTransform
 from audiomentations.core.composition import BaseCompose
+from audiomentations.core.utils import (
+    calculate_desired_noise_rms,
+    calculate_rms,
+    find_audio_files_in_paths,
+)
 
 
 ################################################################################
@@ -47,6 +55,117 @@ class Cut(BaseWaveformTransform):
             return samples
 
 
+class JustNoise(BaseWaveformTransform):
+    def __init__(
+        self,
+        sounds_path: Union[List[Path], List[str], Path, str],
+        min_snr_db: Optional[float] = None,
+        max_snr_db: Optional[float] = None,
+        noise_transform: Optional[
+            Callable[[NDArray[np.float32], int], NDArray[np.float32]]
+        ] = None,
+        p: float = 0.5,
+        lru_cache_size: int = 2,
+    ):
+        super().__init__(p)
+        self.sound_file_paths = find_audio_files_in_paths(sounds_path)
+        self.sound_file_paths = [str(p) for p in self.sound_file_paths]
+
+        assert len(self.sound_file_paths) > 0
+
+        if min_snr_db is not None:
+            self.min_snr_db = min_snr_db
+        else:
+            self.min_snr_db = 3.0  # the default
+
+        if max_snr_db is not None:
+            self.max_snr_db = max_snr_db
+        else:
+            self.max_snr_db = 30.0  # the default
+
+        assert self.min_snr_db <= self.max_snr_db
+
+        self._load_sound = functools.lru_cache(maxsize=lru_cache_size)(
+            JustNoise._load_sound
+        )
+        self.noise_transform = noise_transform
+
+    @staticmethod
+    def _load_sound(file_path, sample_rate):
+        return load_sound_file(file_path, sample_rate)
+
+    def randomize_parameters(self, samples: NDArray[np.float32], sample_rate: int):
+        super().randomize_parameters(samples, sample_rate)
+        if self.parameters["should_apply"]:
+            self.parameters["snr_db"] = random.uniform(self.min_snr_db, self.max_snr_db)
+            self.parameters["noise_file_path"] = random.choice(self.sound_file_paths)
+
+            num_samples = len(samples)
+            noise_sound, _ = self._load_sound(
+                self.parameters["noise_file_path"], sample_rate
+            )
+
+            num_noise_samples = len(noise_sound)
+            min_noise_offset = 0
+            max_noise_offset = max(0, num_noise_samples - num_samples - 1)
+            self.parameters["noise_start_index"] = random.randint(
+                min_noise_offset, max_noise_offset
+            )
+            self.parameters["noise_end_index"] = (
+                self.parameters["noise_start_index"] + num_samples
+            )
+
+    def apply(self, samples: NDArray[np.float32], sample_rate: int):
+        if self.are_parameters_frozen:
+            return np.zeros_like(samples)
+
+        noise_sound, _ = self._load_sound(
+            self.parameters["noise_file_path"], sample_rate
+        )
+        noise_sound = noise_sound[
+            self.parameters["noise_start_index"] : self.parameters["noise_end_index"]
+        ]
+
+        if self.noise_transform:
+            noise_sound = self.noise_transform(noise_sound, sample_rate)
+
+        noise_rms = calculate_rms(noise_sound)
+        if noise_rms < 1e-9:
+            warnings.warn(
+                "The file {} is too silent to be added as noise. Returning the input"
+                " unchanged.".format(self.parameters["noise_file_path"])
+            )
+            return samples
+
+        clean_rms = calculate_rms(samples)
+
+        desired_noise_rms = calculate_desired_noise_rms(
+            clean_rms, self.parameters["snr_db"]
+        )
+
+        # Adjust the noise to match the desired noise RMS
+        noise_sound = noise_sound * (desired_noise_rms / noise_rms)
+
+        # Repeat the sound if it shorter than the input sound
+        num_samples = len(samples)
+        while len(noise_sound) < num_samples:
+            noise_sound = np.concatenate((noise_sound, noise_sound))
+        noise_sound = noise_sound[0:num_samples]
+
+        # Return a mix of the input sound and the background noise sound
+        return noise_sound
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        warnings.warn(
+            "Warning: the LRU cache of AddBackgroundNoise gets discarded when pickling"
+            " it. E.g. this means the cache will not be used when using"
+            " AddBackgroundNoise together with multiprocessing on Windows"
+        )
+        del state["_load_sound"]
+        return state
+
+
 class ToTensor(BaseWaveformTransform):
     def __init__(self, p: float = 1.0):
         super().__init__(p)
@@ -76,6 +195,12 @@ class NoiseDataModule(pl.LightningDataModule):
                 Cut(length=length, is_val=False, p=1.0),
                 Shift(min_shift=-0.5, max_shift=0.5, rollover=False, p=p),
                 AddBackgroundNoise(
+                    sounds_path=f"{data_dir}/train/noise",
+                    min_snr_db=5.0,
+                    max_snr_db=40.0,
+                    p=p,
+                ),
+                JustNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=5.0,
                     max_snr_db=40.0,
@@ -223,7 +348,7 @@ class NoiseDataset(Dataset):
         )
         self.transforms.freeze_parameters()
         for t in self.transforms.transforms:
-            if t.__class__.__name__ not in ["Cut", "Shift", "ToTensor"]:
+            if t.__class__.__name__ not in ["Cut", "Shift", "JustNoise", "ToTensor"]:
                 t.parameters["should_apply"] = False
         clean_waveform = self.transforms(
             samples=clean_waveform, sample_rate=self.sampling_rate
