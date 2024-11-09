@@ -936,6 +936,7 @@ class VADMobileNetV1(nn.Module):
                         padding=(0, padding),
                         bias=bias,
                     ),
+                    nn.BatchNorm2d(hidden_channels),
                     nn.ReLU(inplace=True),
                 )
             ]
@@ -1323,7 +1324,7 @@ class VADLightningMobileNetV1(Model):
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
         enhanced_waveforms, vad = self.model._forward(noisy_waveforms)
-        enhanced_waveforms *= vad[..., None, None] > 0
+        enhanced_waveforms *= vad[..., None, None] > 0.0
         vad_loss = F.binary_cross_entropy_with_logits(
             vad.squeeze(), clean_waveforms.any(dim=-1).float().squeeze()
         )

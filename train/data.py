@@ -230,7 +230,43 @@ class NoiseDataModule(pl.LightningDataModule):
             ]
         )
         self.val_transforms = Compose(
-            [Cut(length=8000, is_val=True, p=1.0), ToTensor(p=1.0)]
+            [
+                Cut(length=length, is_val=False, p=1.0),
+                Shift(min_shift=-0.5, max_shift=0.5, rollover=False, p=p),
+                AddBackgroundNoise(
+                    sounds_path=f"{data_dir}/val/noise",
+                    min_snr_db=5.0,
+                    max_snr_db=40.0,
+                    p=p,
+                ),
+                JustNoise(
+                    sounds_path=f"{data_dir}/val/noise",
+                    min_snr_db=5.0,
+                    max_snr_db=40.0,
+                    p=p,
+                ),
+                PolarityInversion(p=p),
+                BandPassFilter(
+                    min_center_freq=1000,
+                    max_center_freq=4000,
+                    min_bandwidth_fraction=1,
+                    max_bandwidth_fraction=1.99,
+                    p=p / 5,
+                ),
+                AddColorNoise(min_snr_db=10.0, max_snr_db=40.0, p=p),
+                RoomSimulator(
+                    min_absorption_value=0.075,
+                    max_absorption_value=0.4,
+                    leave_length_unchanged=True,
+                    p=p,
+                ),
+                BitCrush(
+                    min_bit_depth=8,
+                    max_bit_depth=12,
+                    p=p,
+                ),
+                ToTensor(p=1.0),
+            ]
         )
 
     def get_files(self, data_dir: str | PathLike) -> list[tuple[Path, Path | None]]:
@@ -356,3 +392,163 @@ class NoiseDataset(Dataset):
         self.transforms.unfreeze_parameters()
 
         return noisy_waveform, clean_waveform, paths[1].stem[6:]
+
+
+class VADNoiseDataModule(NoiseDataModule):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.save_hyperparameters()
+        length = self.hparams.length
+        data_dir = self.hparams.data_dir
+        p = self.hparams.p
+
+        self.train_transforms = Compose(
+            [
+                Cut(length=length, is_val=False, p=1.0),
+                Shift(min_shift=-0.5, max_shift=0.5, rollover=False, p=p),
+                AddBackgroundNoise(
+                    sounds_path=f"{data_dir}/train/noise",
+                    min_snr_db=5.0,
+                    max_snr_db=40.0,
+                    p=p,
+                ),
+                JustNoise(
+                    sounds_path=f"{data_dir}/train/noise",
+                    min_snr_db=5.0,
+                    max_snr_db=40.0,
+                    p=p,
+                ),
+                PolarityInversion(p=p),
+                BandPassFilter(
+                    min_center_freq=1000,
+                    max_center_freq=4000,
+                    min_bandwidth_fraction=1,
+                    max_bandwidth_fraction=1.99,
+                    p=p / 5,
+                ),
+                AddColorNoise(min_snr_db=10.0, max_snr_db=40.0, p=p),
+                RoomSimulator(
+                    min_absorption_value=0.075,
+                    max_absorption_value=0.4,
+                    leave_length_unchanged=True,
+                    p=p,
+                ),
+                BitCrush(
+                    min_bit_depth=8,
+                    max_bit_depth=12,
+                    p=p,
+                ),
+                ToTensor(p=1.0),
+            ]
+        )
+        self.val_transforms = Compose(
+            [
+                Cut(length=length, is_val=False, p=1.0),
+                Shift(min_shift=-0.5, max_shift=0.5, rollover=False, p=p),
+                AddBackgroundNoise(
+                    sounds_path=f"{data_dir}/val/noise",
+                    min_snr_db=5.0,
+                    max_snr_db=40.0,
+                    p=p,
+                ),
+                JustNoise(
+                    sounds_path=f"{data_dir}/val/noise",
+                    min_snr_db=5.0,
+                    max_snr_db=40.0,
+                    p=p,
+                ),
+                PolarityInversion(p=p),
+                BandPassFilter(
+                    min_center_freq=1000,
+                    max_center_freq=4000,
+                    min_bandwidth_fraction=1,
+                    max_bandwidth_fraction=1.99,
+                    p=p / 5,
+                ),
+                AddColorNoise(min_snr_db=10.0, max_snr_db=40.0, p=p),
+                RoomSimulator(
+                    min_absorption_value=0.075,
+                    max_absorption_value=0.4,
+                    leave_length_unchanged=True,
+                    p=p,
+                ),
+                BitCrush(
+                    min_bit_depth=8,
+                    max_bit_depth=12,
+                    p=p,
+                ),
+                ToTensor(p=1.0),
+            ]
+        )
+
+    def get_files(self, data_dir: str | PathLike) -> list[tuple[Path, Path | None]]:
+        data_dir = Path(data_dir)
+        return list((data_dir / "clean").rglob("*.wav"))
+
+    def setup(self, stage: str) -> None:
+        """Data operations to perform on every GPUs.
+
+        Parameters
+        ----------
+        stage : str
+            _description_
+        """
+        data_dir = Path(self.hparams.data_dir)
+        self.train_files = self.get_files(data_dir / "train")
+        self.val_files = self.get_files(data_dir / "val")
+
+        if stage == "fit":
+            self.trainset = VADNoiseDataset(
+                self.train_files,
+                self.hparams.num_samples,
+                self.hparams.sampling_rate,
+                self.train_transforms,
+            )
+            self.valset = VADNoiseDataset(
+                self.val_files, -1, self.hparams.sampling_rate, self.val_transforms
+            )
+        elif stage == "predict":
+            self.valset = VADNoiseDataset(
+                self.val_files, -1, self.hparams.sampling_rate, self.val_transforms
+            )
+        else:
+            raise ValueError(f"Stage {stage} is not supported.")
+
+
+class VADNoiseDataset(Dataset):
+    def __init__(
+        self,
+        files: list[tuple[Path, Path | None]],
+        num_samples: int,
+        sampling_rate: int,
+        transforms: BaseCompose,
+    ):
+        super().__init__()
+        random.shuffle(files)
+        if num_samples > 0:
+            self.files = files[:num_samples]
+        else:
+            self.files = files
+        self.num_samples = num_samples
+        self.sampling_rate = sampling_rate
+        self.transforms = transforms
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def __getitem__(self, index: int) -> Dict[str, Tensor]:
+        path = self.files[index]
+        clean_waveform, _ = librosa.load(path, sr=self.sampling_rate)
+        noisy_waveform = self.transforms(
+            samples=clean_waveform, sample_rate=self.sampling_rate
+        )
+        self.transforms.freeze_parameters()
+        for t in self.transforms.transforms:
+            if t.__class__.__name__ not in ["Cut", "Shift", "JustNoise", "ToTensor"]:
+                t.parameters["should_apply"] = False
+        clean_waveform = self.transforms(
+            samples=clean_waveform, sample_rate=self.sampling_rate
+        )
+        self.transforms.unfreeze_parameters()
+        return noisy_waveform, clean_waveform, path.stem[6:]
