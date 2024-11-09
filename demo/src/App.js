@@ -148,13 +148,9 @@ function App() {
 
         const processedSourceNode =
           audioContext.current.createMediaStreamSource(processedStream.current);
-        processedSourceNode.connect(filterNode);
-        filterNode.connect(gainNode);
-        gainNode.connect(analyser.current);
+        processedSourceNode.connect(analyser.current);
       } else {
-        sourceNode.connect(filterNode);
-        filterNode.connect(gainNode);
-        gainNode.connect(analyser.current);
+        sourceNode.connect(analyser.current);
       }
 
       analyser.current.connect(audioContext.current.destination);

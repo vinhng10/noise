@@ -1,6 +1,6 @@
 import * as ort from "onnxruntime-web/webgpu";
 
-ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
+ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
 
 const maxSize = 50;
 const size = 50;

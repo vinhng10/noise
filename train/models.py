@@ -999,7 +999,7 @@ class VADMobileNetV1(nn.Module):
             self.tgt_sampling_rate,
         )
         x, vad = self._forward(x)
-        x *= vad.sigmoid().round()
+        x *= (1e4 * vad).sigmoid()
         x = torchaudio.functional.resample(
             x,
             self.tgt_sampling_rate,
@@ -1035,7 +1035,6 @@ class VADMobileNetV1(nn.Module):
             x = upsampling_block(x)
 
         x = x[:, :, :, -L:] * std
-
         return x, vad
 
 
