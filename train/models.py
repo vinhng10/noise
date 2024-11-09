@@ -899,6 +899,145 @@ class MobileNetV1(nn.Module):
         return x
 
 
+class VADMobileNetV1(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        encoder_n_layers: int,
+        nhead: int,
+        num_layers: int,
+        dropout: float,
+        bias: bool,
+        src_sampling_rate: int,
+        tgt_sampling_rate: int,
+    ) -> None:
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.encoder_n_layers = encoder_n_layers
+        self.src_sampling_rate = src_sampling_rate
+        self.tgt_sampling_rate = tgt_sampling_rate
+
+        # encoder and decoder
+        self.encoder = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        hidden_channels,
+                        kernel_size=(1, kernel_size),
+                        stride=(1, stride),
+                        padding=(0, padding),
+                        bias=bias,
+                    ),
+                    nn.ReLU(inplace=True),
+                )
+            ]
+        )
+        self.decoder = nn.ModuleList(
+            [
+                nn.ConvTranspose2d(
+                    hidden_channels,
+                    out_channels,
+                    kernel_size=(1, kernel_size),
+                    stride=(1, stride),
+                    padding=(0, padding),
+                    output_padding=(0, 0),
+                    bias=bias,
+                )
+            ]
+        )
+
+        for i in range(encoder_n_layers):
+            in_channels = hidden_channels
+            out_channels = hidden_channels
+            hidden_channels = min(hidden_channels * 2, max_channels)
+            self.encoder.append(
+                DepthwiseSeparableConv(
+                    in_channels, hidden_channels, kernel_size, stride, padding, bias
+                )
+            )
+            self.decoder.insert(
+                0,
+                DepthwiseSeparableConvTranspose(
+                    hidden_channels,
+                    out_channels,
+                    kernel_size,
+                    stride,
+                    padding,
+                    0,
+                    bias,
+                    i == 0,
+                ),
+            )
+
+        self.bottleneck_attention = TransformerEncoder(
+            d_word_vec=hidden_channels,
+            n_layers=num_layers,
+            n_head=nhead,
+            d_k=hidden_channels // nhead,
+            d_v=hidden_channels // nhead,
+            d_model=hidden_channels,
+            d_inner=hidden_channels,
+            dropout=dropout,
+            n_position=0,
+            scale_emb=False,
+        )
+        self.vad = nn.Linear(hidden_channels, 1)
+
+    def forward(self, waveforms):
+        x = torchaudio.functional.resample(
+            waveforms,
+            self.src_sampling_rate,
+            self.tgt_sampling_rate,
+        )
+        x, vad = self._forward(x)
+        x *= vad.sigmoid().round()
+        x = torchaudio.functional.resample(
+            x,
+            self.tgt_sampling_rate,
+            self.src_sampling_rate,
+        )
+        return x
+
+    def _forward(self, x):
+        L = x.shape[-1]
+        std = x.std(dim=-1, keepdim=True) + 1e-3
+        x = x / std
+        x = padding(x, self.encoder_n_layers + 1, self.kernel_size, self.stride)
+
+        # encoder
+        downs = []
+        for downsampling_block in self.encoder:
+            x = downsampling_block(x)
+            downs.append(x)
+        downs = downs[::-1]
+
+        # attention & vad
+        x = x.squeeze(2).permute(0, 2, 1)
+        x = self.bottleneck_attention(x, None)
+        vad = self.vad(x[:, 0, :])
+        x = x.permute(0, 2, 1).unsqueeze(2)
+
+        # decoder
+        ups = []
+        for i, upsampling_block in enumerate(self.decoder):
+            ups.append(x)
+            skip_i = downs[i]
+            x = x + skip_i[:, :, :, -x.shape[-1] :]
+            x = upsampling_block(x)
+
+        x = x[:, :, :, -L:] * std
+
+        return x, vad
+
+
 class Discriminator(nn.Module):
     def __init__(
         self,
@@ -1136,101 +1275,65 @@ class LightningMobileNetV1(Model):
         return self.model(x)
 
 
-class DilatedConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation, bias):
-        super(DilatedConvBlock, self).__init__()
-        self.layer = nn.Sequential(
-            nn.ZeroPad2d((dilation * (kernel_size - 1), 0, 0, 0)),
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=[1, kernel_size],
-                dilation=[1, dilation],
-                bias=bias,
-            ),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
+class VADLightningMobileNetV1(Model):
 
-    def forward(self, x):
-        x = self.layer(x)
-        return x
-
-
-class DilatedConvNet(Model):
     def __init__(
         self,
         in_channels: int,
         hidden_channels: int,
         max_channels: int,
+        out_channels: int,
         kernel_size: int,
-        bias: bool,
+        stride: int,
+        padding: int,
+        encoder_n_layers: int,
+        nhead: int,
         num_layers: int,
+        dropout: float,
+        bias: bool,
         src_sampling_rate: int,
         tgt_sampling_rate: int,
         mr_stft_lambda: float,
         fft_sizes: List[int],
         hop_lengths: List[int],
         win_lengths: List[int],
-    ):
+    ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.src_sampling_rate = src_sampling_rate
-        self.tgt_sampling_rate = tgt_sampling_rate
-
-        layers = []
-        for i in range(num_layers):
-            dilation = 2**i  # Double dilation each layer
-            layers.append(
-                DilatedConvBlock(
-                    in_channels, hidden_channels, kernel_size, dilation, bias
-                )
-            )
-            in_channels = hidden_channels
-            hidden_channels = min(hidden_channels * 2, max_channels)
-
-        self.model = nn.Sequential(
-            *layers,
-            nn.Conv2d(
-                (
-                    hidden_channels
-                    if hidden_channels == max_channels
-                    else hidden_channels // 2
-                ),
-                1,
-                kernel_size=1,
-            ),
+        self.model = VADMobileNetV1(
+            in_channels,
+            hidden_channels,
+            max_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            encoder_n_layers,
+            nhead,
+            num_layers,
+            dropout,
+            bias,
+            src_sampling_rate,
+            tgt_sampling_rate,
         )
 
-    def forward(self, waveforms):
-        x = torchaudio.functional.resample(
-            waveforms,
-            self.src_sampling_rate,
-            self.tgt_sampling_rate,
-        )
-
-        x = self._forward(x)
-
-        x = torchaudio.functional.resample(
-            x,
-            self.tgt_sampling_rate,
-            self.src_sampling_rate,
-        )
-        return x
-
-    def _forward(self, x):
+    def forward(self, x):
         return self.model(x)
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
-        enhanced_waveforms = self._forward(noisy_waveforms)
+        enhanced_waveforms, vad = self.model._forward(noisy_waveforms)
+        enhanced_waveforms *= vad[..., None, None] > 0
+        vad_loss = F.binary_cross_entropy_with_logits(
+            vad.squeeze(), clean_waveforms.any(dim=-1).float().squeeze()
+        )
         l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
         mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
             enhanced_waveforms, clean_waveforms
         )
-        loss = l1_loss + mrstft_loss
+        loss = l1_loss + mrstft_loss + vad_loss
         self.log_dict(
-            {f"{stage}_loss": loss},
+            {f"{stage}_loss": loss, f"{stage}_vad_loss": vad_loss},
             on_step=False,
             on_epoch=True,
             prog_bar=True,
