@@ -420,13 +420,6 @@ class VADNoiseDataModule(NoiseDataModule):
                     p=p,
                 ),
                 PolarityInversion(p=p),
-                BandPassFilter(
-                    min_center_freq=1000,
-                    max_center_freq=4000,
-                    min_bandwidth_fraction=1,
-                    max_bandwidth_fraction=1.99,
-                    p=p / 5,
-                ),
                 AddColorNoise(min_snr_db=10.0, max_snr_db=40.0, p=p),
                 RoomSimulator(
                     min_absorption_value=0.075,
@@ -459,13 +452,6 @@ class VADNoiseDataModule(NoiseDataModule):
                     p=p,
                 ),
                 PolarityInversion(p=p),
-                BandPassFilter(
-                    min_center_freq=1000,
-                    max_center_freq=4000,
-                    min_bandwidth_fraction=1,
-                    max_bandwidth_fraction=1.99,
-                    p=p / 5,
-                ),
                 AddColorNoise(min_snr_db=10.0, max_snr_db=40.0, p=p),
                 RoomSimulator(
                     min_absorption_value=0.075,
