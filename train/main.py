@@ -1,10 +1,12 @@
 import torch
-# from torch.optim.lr_scheduler import ReduceLROnPlateau
+import warnings
 from lightning.pytorch.cli import LightningCLI, ReduceLROnPlateau
 
 from data import *
 from models import *
 from schedulers import *
+
+warnings.filterwarnings("ignore")
 
 
 class CLI(LightningCLI):
