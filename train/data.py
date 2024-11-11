@@ -405,14 +405,14 @@ class VADNoiseDataModule(NoiseDataModule):
 
         self.train_transforms = Compose(
             [
-                Cut(length=length, is_val=False, p=1.0),
-                Shift(min_shift=-0.5, max_shift=0.5, rollover=False, p=p),
+                Shift(min_shift=-0.5, max_shift=0.5, rollover=True, p=p),
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=5.0,
                     max_snr_db=40.0,
                     p=p,
                 ),
+                Cut(length=length, is_val=False, p=1.0),
                 JustNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=5.0,
@@ -437,14 +437,14 @@ class VADNoiseDataModule(NoiseDataModule):
         )
         self.val_transforms = Compose(
             [
-                Cut(length=length, is_val=False, p=1.0),
-                Shift(min_shift=-0.5, max_shift=0.5, rollover=False, p=p),
+                Shift(min_shift=-0.5, max_shift=0.5, rollover=True, p=p),
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/val/noise",
                     min_snr_db=5.0,
                     max_snr_db=40.0,
                     p=p,
                 ),
+                Cut(length=length, is_val=True, p=1.0),
                 JustNoise(
                     sounds_path=f"{data_dir}/val/noise",
                     min_snr_db=5.0,

@@ -96,7 +96,7 @@ fit:
     num_samples: 5000
     num_workers: 8
     batch_size: 128
-    p: 0.5
+    p: 0.3
   optimizer:
     lr: 2e-4
     betas:
