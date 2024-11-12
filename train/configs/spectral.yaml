@@ -72,18 +72,14 @@ fit:
     default_root_dir: null
   model:
     max_frames: 8000
-    n_fft: 256
+    n_fft: 512
     hop_length: 64
-    win_length: 256
+    win_length: 512
     window: hann
     src_sampling_rate: 48000
     tgt_sampling_rate: 16000
-    mr_stft_lambda: 0.5
-    fft_sizes: [512, 1024, 2048]
-    hop_lengths: [50, 120, 240]
-    win_lengths: [240, 600, 1200]
   data:
-    data_dir: ./data-debug
+    data_dir: ./data
     sampling_rate: 16000
     length: 8000
     num_samples: 5000

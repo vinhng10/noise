@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import numpy as np
 import torchaudio
 from librosa import util as librosa_util
-from librosa.util import pad_center, tiny
+from librosa.util import pad_center
 from scipy.signal import get_window
 from torch.autograd import Variable
 
@@ -1344,27 +1344,27 @@ class VADLightningMobileNetV1(Model):
         return loss
 
 
-class InverseSTFT(torch.nn.Module):
+class STFT(torch.nn.Module):
     """adapted from Prem Seetharaman's https://github.com/pseeth/pytorch-stft"""
 
     def __init__(self, max_frames, n_fft, hop_length, win_length, window):
-        super(InverseSTFT, self).__init__()
+        super().__init__()
         self.max_frames = max_frames
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
         self.window = window
-        self.forward_transform = None
-        scale = self.n_fft / self.hop_length
-        fourier_basis = np.fft.fft(np.eye(self.n_fft))
+        self.scale = n_fft / hop_length
+        self.pad_amount = n_fft // 2
 
+        fourier_basis = np.fft.fft(np.eye(self.n_fft))
         cutoff = int((self.n_fft / 2 + 1))
         fourier_basis = np.vstack(
             [np.real(fourier_basis[:cutoff, :]), np.imag(fourier_basis[:cutoff, :])]
         )
-
+        forward_basis = torch.FloatTensor(fourier_basis[:, None, :])
         inverse_basis = torch.FloatTensor(
-            np.linalg.pinv(scale * fourier_basis).T[:, None, :]
+            np.linalg.pinv(self.scale * fourier_basis).T[:, None, :]
         )
         if window is not None:
             assert n_fft >= win_length
@@ -1373,20 +1373,42 @@ class InverseSTFT(torch.nn.Module):
             fft_window = pad_center(fft_window, size=n_fft)
             fft_window = torch.from_numpy(fft_window).float()
             # window the bases
+            forward_basis *= fft_window
             inverse_basis *= fft_window
         window_sum = self.window_sumsquare(
             self.window,
-            max_frames,
+            self.max_frames,
             hop_length=self.hop_length,
             win_length=self.win_length,
             n_fft=self.n_fft,
             dtype=np.float32,
         )
-        self.register_buffer("inverse_basis", inverse_basis.float())
-        self.register_buffer("window_sum", torch.from_numpy(window_sum))
-        self.tiny = tiny(window_sum)
+        window_sum[window_sum == 0] = 1
+        window_sum = self.scale / window_sum
+        window_sum = torch.from_numpy(window_sum)
 
-    def forward(self, magnitude, phase):
+        self.register_buffer("forward_basis", forward_basis.float())
+        self.register_buffer("inverse_basis", inverse_basis.float())
+        self.register_buffer("window_sum", window_sum)
+
+    def forward(self, waveform):
+        waveform = F.pad(
+            waveform.squeeze(1), (self.pad_amount, self.pad_amount), mode="reflect"
+        )
+
+        forward_transform = F.conv1d(
+            waveform, self.forward_basis, stride=self.hop_length, padding=0
+        )
+
+        cutoff = (self.n_fft // 2) + 1
+        real_part = forward_transform[:, :cutoff, :]
+        imag_part = forward_transform[:, cutoff:, :]
+
+        stft = torch.stack([real_part, imag_part], dim=1)
+
+        return stft
+
+    def inverse(self, magnitude, phase):
         recombine_magnitude_phase = torch.cat(
             [magnitude * torch.cos(phase), magnitude * torch.sin(phase)], dim=1
         )
@@ -1397,19 +1419,11 @@ class InverseSTFT(torch.nn.Module):
             padding=0,
         )
         if self.window is not None:
-            win_dim = inverse_transform.size(-1)
-            window_sum = self.window_sum[:win_dim]
-            # remove modulation effects
-            inverse_transform = inverse_transform.squeeze()
-            approx_nonzero_indices = (window_sum > self.tiny).nonzero()
-            inverse_transform[approx_nonzero_indices] /= window_sum[
-                approx_nonzero_indices
-            ]
-            inverse_transform = inverse_transform.unsqueeze(0).unsqueeze(1)
-            # scale by hop ratio
-            inverse_transform *= float(self.n_fft) / self.hop_length
-        n = (inverse_transform.size(-1) - self.max_frames) // 2
-        inverse_transform = inverse_transform[:, :, n:-n]
+            inverse_transform *= self.window_sum[: inverse_transform.size(-1)]
+
+        inverse_transform = inverse_transform[
+            :, None, :, self.pad_amount : -self.pad_amount
+        ]
         return inverse_transform
 
     @staticmethod
@@ -1481,10 +1495,11 @@ class Spectral(nn.Module):
         self.n_fft = n_fft
         self.hop_length = hop_length if hop_length is not None else n_fft // 4
         self.win_length = win_length if win_length is not None else n_fft
-        self.window = torch.hann_window(self.win_length) if window == "hann" else window
+        _window = torch.hann_window(self.win_length) if window == "hann" else window
+        self.register_buffer("window", _window)
         self.src_sampling_rate = src_sampling_rate
         self.tgt_sampling_rate = tgt_sampling_rate
-        self.istft = InverseSTFT(
+        self.stft = STFT(
             max_frames=max_frames,
             n_fft=self.n_fft,
             hop_length=self.hop_length,
@@ -1494,12 +1509,16 @@ class Spectral(nn.Module):
 
         self.filters = nn.Sequential(
             nn.Conv2d(2, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 2, kernel_size=3, padding=1),
+            nn.BatchNorm2d(2),
             nn.ReLU(inplace=True),
         )
 
@@ -1510,7 +1529,18 @@ class Spectral(nn.Module):
             self.tgt_sampling_rate,
         )
 
-        x = self._forward(x)
+        # Compute the STFT to get magnitude and phase
+        stft = self.stft.forward(x)
+
+        # Forward pass
+        stft = self._forward(stft)
+
+        # Reconstruct the waveform from the magnitude and phase
+        real = stft[:, 0, :, :]
+        imag = stft[:, 1, :, :]
+        magnitude = torch.sqrt(real**2 + imag**2)
+        phase = torch.atan2(imag, real)
+        x = self.stft.inverse(magnitude, phase)
 
         x = torchaudio.functional.resample(
             x,
@@ -1519,30 +1549,10 @@ class Spectral(nn.Module):
         )
         return x
 
-    def _forward(self, x):
-        # Compute the STFT to get magnitude and phase
-        stft = torch.stft(
-            x[:, 0, 0, :],
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-            window=self.window,
-            return_complex=False,
-        )
-
-        # Apply filters:
-        filters = self.filters(stft.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
-        stft *= filters
-
-        real = stft[..., 0]
-        imag = stft[..., 1]
-        magnitude = torch.sqrt(real**2 + imag**2)
-        phase = torch.atan2(imag, real)
-
-        # Reconstruct the waveform from the magnitude and phase
-        x = self.istft(magnitude, phase)[:, None, :]
-
-        return x
+    def _forward(self, stft):
+        filters = self.filters(stft)
+        filtered_stft = stft * filters
+        return filtered_stft
 
 
 class LightningSpectral(Model):
@@ -1555,12 +1565,9 @@ class LightningSpectral(Model):
         window: str,
         src_sampling_rate: int,
         tgt_sampling_rate: int,
-        mr_stft_lambda: float,
-        fft_sizes: List[int],
-        hop_lengths: List[int],
-        win_lengths: List[int],
     ):
         super().__init__()
+        self.save_hyperparameters()
         self.model = Spectral(
             max_frames,
             n_fft,
@@ -1570,3 +1577,19 @@ class LightningSpectral(Model):
             src_sampling_rate,
             tgt_sampling_rate,
         )
+
+    def _shared_step(self, batch, batch_idx, stage):
+        noisy_waveforms, clean_waveforms, _ = batch
+        noisy_stft = self.model.stft.forward(noisy_waveforms)
+        clean_stft = self.model.stft.forward(clean_waveforms)
+        enhanced_stft = self.model._forward(noisy_stft)
+        loss = F.l1_loss(enhanced_stft, clean_stft)
+        self.log_dict(
+            {f"{stage}_loss": loss},
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+        return loss
