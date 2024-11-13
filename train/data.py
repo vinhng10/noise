@@ -409,18 +409,18 @@ class VADNoiseDataModule(NoiseDataModule):
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=-5.0,
-                    max_snr_db=10.0,
+                    max_snr_db=30.0,
                     p=1.0,
                 ),
                 Cut(length=length, is_val=False, p=1.0),
                 JustNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=-5.0,
-                    max_snr_db=10.0,
+                    max_snr_db=30.0,
                     p=p,
                 ),
                 PolarityInversion(p=p),
-                AddColorNoise(min_snr_db=-5.0, max_snr_db=10.0, p=p),
+                AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 BitCrush(
                     min_bit_depth=8,
                     max_bit_depth=12,
@@ -435,18 +435,18 @@ class VADNoiseDataModule(NoiseDataModule):
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/val/noise",
                     min_snr_db=-5.0,
-                    max_snr_db=10.0,
+                    max_snr_db=30.0,
                     p=1.0,
                 ),
                 Cut(length=length, is_val=True, p=1.0),
                 JustNoise(
                     sounds_path=f"{data_dir}/val/noise",
                     min_snr_db=-5.0,
-                    max_snr_db=10.0,
+                    max_snr_db=30.0,
                     p=p,
                 ),
                 PolarityInversion(p=p),
-                AddColorNoise(min_snr_db=-5.0, max_snr_db=10.0, p=p),
+                AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 BitCrush(
                     min_bit_depth=8,
                     max_bit_depth=12,

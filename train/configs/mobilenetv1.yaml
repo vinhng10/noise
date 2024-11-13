@@ -12,7 +12,7 @@ fit:
       init_args:
         save_dir: ./logs
         name: null
-        version: mobilenetv1-5.0.0
+        version: mobilenetv1-5.0.1
         log_graph: false
         default_hp_metric: false
         prefix: ""
@@ -86,9 +86,9 @@ fit:
     src_sampling_rate: 48000
     tgt_sampling_rate: 16000
     mr_stft_lambda: 0.5
-    fft_sizes: [512, 1024, 2048]
-    hop_lengths: [50, 120, 240]
-    win_lengths: [240, 600, 1200]
+    fft_sizes: [512]
+    hop_lengths: [64]
+    win_lengths: [512]
   data:
     data_dir: ./data
     sampling_rate: 16000
