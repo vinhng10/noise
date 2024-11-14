@@ -525,7 +525,14 @@ class VADNoiseDataset(Dataset):
         )
         self.transforms.freeze_parameters()
         for t in self.transforms.transforms:
-            if t.__class__.__name__ not in ["Cut", "Shift", "JustNoise", "ToTensor"]:
+            if t.__class__.__name__ not in [
+                "Gain",
+                "Cut",
+                "Shift",
+                "JustNoise",
+                "ToTensor",
+                "Clip",
+            ]:
                 t.parameters["should_apply"] = False
         clean_waveform = self.transforms(
             samples=clean_waveform, sample_rate=self.sampling_rate
