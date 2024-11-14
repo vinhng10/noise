@@ -405,7 +405,7 @@ class VADNoiseDataModule(NoiseDataModule):
 
         self.train_transforms = Compose(
             [
-                Gain(min_gain_db=-15, max_gain_db=5, p=p),
+                Gain(min_gain_db=-15, max_gain_db=5, p=1.0),
                 Shift(min_shift=-0.5, max_shift=0.5, rollover=True, p=p),
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/train/noise",
@@ -434,7 +434,7 @@ class VADNoiseDataModule(NoiseDataModule):
         )
         self.val_transforms = Compose(
             [
-                Gain(min_gain_db=-15, max_gain_db=5, p=p),
+                Gain(min_gain_db=-15, max_gain_db=5, p=1.0),
                 Shift(min_shift=-0.5, max_shift=0.5, rollover=True, p=p),
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/val/noise",
