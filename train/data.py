@@ -421,6 +421,7 @@ class VADNoiseDataModule(NoiseDataModule):
                     p=p,
                 ),
                 PolarityInversion(p=p),
+                LowPassFilter(min_cutoff_freq=1000, max_cutoff_freq=10000, p=p),
                 AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 BitCrush(
                     min_bit_depth=8,
@@ -449,6 +450,7 @@ class VADNoiseDataModule(NoiseDataModule):
                     p=p,
                 ),
                 PolarityInversion(p=p),
+                LowPassFilter(min_cutoff_freq=1000, max_cutoff_freq=10000, p=p),
                 AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 BitCrush(
                     min_bit_depth=8,
