@@ -8,6 +8,7 @@ import numpy as np
 import lightning.pytorch as pl
 from numpy.typing import NDArray
 from os import PathLike
+from scipy.signal import fftconvolve
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
 from torch import Tensor
@@ -164,6 +165,34 @@ class JustNoise(BaseWaveformTransform):
         )
         del state["_load_sound"]
         return state
+
+
+class ImpulseResponse(BaseWaveformTransform):
+    def __init__(
+        self,
+        sounds_path: Union[List[Path], List[str], Path, str],
+        p: float = 0.5,
+    ):
+        super().__init__(p)
+        self.sound_file_paths = find_audio_files_in_paths(sounds_path)
+        self.sound_file_paths = [str(p) for p in self.sound_file_paths]
+        assert len(self.sound_file_paths) > 0
+
+    def randomize_parameters(self, samples: NDArray[np.float32], sample_rate: int):
+        super().randomize_parameters(samples, sample_rate)
+        if self.parameters["should_apply"]:
+            self.parameters["ir_file_path"] = random.choice(self.sound_file_paths)
+
+    def apply(
+        self, samples: NDArray[np.float32], sample_rate: int
+    ) -> NDArray[np.float32]:
+        # Convolve the input signal with the impulse response
+        ir, _ = load_sound_file(self.parameters["ir_file_path"], sample_rate)
+        ir = ir / np.abs(ir).max()
+        reverb_samples = fftconvolve(samples, ir, mode="full")
+        reverb_samples = reverb_samples[: len(samples)]
+        reverb_samples = reverb_samples.clip(-1.0, 1.0)
+        return reverb_samples
 
 
 class ToTensor(BaseWaveformTransform):
@@ -421,8 +450,8 @@ class VADNoiseDataModule(NoiseDataModule):
                     p=p,
                 ),
                 PolarityInversion(p=p),
-                LowPassFilter(min_cutoff_freq=1000, max_cutoff_freq=10000, p=p),
                 AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
+                ImpulseResponse(sounds_path=f"{data_dir}/train/ir", p=0.5),
                 BitCrush(
                     min_bit_depth=8,
                     max_bit_depth=12,
@@ -450,8 +479,8 @@ class VADNoiseDataModule(NoiseDataModule):
                     p=p,
                 ),
                 PolarityInversion(p=p),
-                LowPassFilter(min_cutoff_freq=1000, max_cutoff_freq=10000, p=p),
                 AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
+                ImpulseResponse(sounds_path=f"{data_dir}/val/ir", p=0.5),
                 BitCrush(
                     min_bit_depth=8,
                     max_bit_depth=12,
