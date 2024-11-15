@@ -188,9 +188,23 @@ class ImpulseResponse(BaseWaveformTransform):
     ) -> NDArray[np.float32]:
         # Convolve the input signal with the impulse response
         ir, _ = load_sound_file(self.parameters["ir_file_path"], sample_rate)
-        ir = ir / np.abs(ir).max()
         reverb_samples = fftconvolve(samples, ir, mode="full")
         reverb_samples = reverb_samples[: len(samples)]
+        
+        # Compute RMS of input and output signals
+        input_rms = np.sqrt(np.mean(samples**2))
+        output_rms = np.sqrt(np.mean(reverb_samples**2))
+
+        # Avoid division by zero in case output_rms is zero
+        if output_rms > 0:
+            scaling_factor = input_rms / output_rms
+        else:
+            scaling_factor = 1.0  # No scaling if the output RMS is zero
+
+        # Scale the output signal to match input RMS
+        reverb_samples = reverb_samples * scaling_factor
+
+        # Clip to ensure values remain in the [-1.0, 1.0] range
         reverb_samples = reverb_samples.clip(-1.0, 1.0)
         return reverb_samples
 
