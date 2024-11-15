@@ -18,7 +18,7 @@ class CLI(LightningCLI):
 
 def cli_main():
     cli = CLI(
-        LightningSpectral,
+        VADLightningMobileNetV1,
         VADNoiseDataModule,
         save_config_kwargs={"overwrite": True},
         parser_kwargs={"parser_mode": "yaml"},

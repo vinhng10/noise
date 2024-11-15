@@ -1334,7 +1334,7 @@ class VADLightningMobileNetV1(Model):
         )
         loss = l1_loss + mrstft_loss + vad_loss
         self.log_dict(
-            {f"{stage}_loss": loss, f"{stage}_vad_loss": vad_loss},
+            {f"{stage}_loss": loss},
             on_step=False,
             on_epoch=True,
             prog_bar=True,
