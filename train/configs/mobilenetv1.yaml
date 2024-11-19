@@ -98,7 +98,7 @@ fit:
     batch_size: 128
     p: 0.3
   optimizer:
-    lr: 2e-4
+    lr: 1e-4
     betas:
       - 0.9
       - 0.999
@@ -112,8 +112,8 @@ fit:
     fused: null
   lr_scheduler:
     mode: min
-    factor: 0.8
-    patience: 300
-    min_lr: 2e-4
+    factor: 0.5
+    patience: 50
+    min_lr: 1e-6
     monitor: val_loss
       
