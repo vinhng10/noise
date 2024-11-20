@@ -1323,12 +1323,14 @@ class VADLightningMobileNetV1(Model):
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
+        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
+        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
         enhanced_waveforms, vad = self.model._forward(noisy_waveforms)
-        enhanced_waveforms *= vad[..., None, None] > 0.0
+        enhanced_waveforms = enhanced_waveforms * (1e2 * vad[..., None, None]).sigmoid()
         vad_loss = F.binary_cross_entropy_with_logits(
             vad.squeeze(), clean_waveforms.any(dim=-1).float().squeeze()
         )
-        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+        l1_loss = F.smooth_l1_loss(enhanced_waveforms, clean_waveforms, beta=0.5)
         mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
             enhanced_waveforms, clean_waveforms
         )
