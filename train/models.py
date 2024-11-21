@@ -1323,14 +1323,12 @@ class VADLightningMobileNetV1(Model):
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
-        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
-        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
         enhanced_waveforms, vad = self.model._forward(noisy_waveforms)
-        enhanced_waveforms = enhanced_waveforms * (1e2 * vad[..., None, None]).sigmoid()
+        enhanced_waveforms *= vad[..., None, None] > 0.0
         vad_loss = F.binary_cross_entropy_with_logits(
             vad.squeeze(), clean_waveforms.any(dim=-1).float().squeeze()
         )
-        l1_loss = F.smooth_l1_loss(enhanced_waveforms, clean_waveforms, beta=0.5)
+        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
         mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
             enhanced_waveforms, clean_waveforms
         )
@@ -1358,11 +1356,14 @@ class STFT(torch.nn.Module):
         self.window = window
         self.scale = n_fft / hop_length
         self.pad_amount = n_fft // 2
+        self.cutoff = (self.n_fft // 2) + 1
 
         fourier_basis = np.fft.fft(np.eye(self.n_fft))
-        cutoff = int((self.n_fft / 2 + 1))
         fourier_basis = np.vstack(
-            [np.real(fourier_basis[:cutoff, :]), np.imag(fourier_basis[:cutoff, :])]
+            [
+                np.real(fourier_basis[: self.cutoff, :]),
+                np.imag(fourier_basis[: self.cutoff, :]),
+            ]
         )
         forward_basis = torch.FloatTensor(fourier_basis[:, None, :])
         inverse_basis = torch.FloatTensor(
@@ -1402,13 +1403,13 @@ class STFT(torch.nn.Module):
             waveform, self.forward_basis, stride=self.hop_length, padding=0
         )
 
-        cutoff = (self.n_fft // 2) + 1
-        real_part = forward_transform[:, :cutoff, :]
-        imag_part = forward_transform[:, cutoff:, :]
+        real = forward_transform[:, : self.cutoff, :]
+        imag = forward_transform[:, self.cutoff :, :]
 
-        stft = torch.stack([real_part, imag_part], dim=1)
+        magnitude = torch.sqrt(real**2 + imag**2)
+        phase = torch.atan2(imag, real)
 
-        return stft
+        return magnitude, phase
 
     def inverse(self, magnitude, phase):
         recombine_magnitude_phase = torch.cat(
@@ -1416,7 +1417,7 @@ class STFT(torch.nn.Module):
         )
         inverse_transform = F.conv_transpose1d(
             recombine_magnitude_phase,
-            Variable(self.inverse_basis, requires_grad=False),
+            self.inverse_basis,
             stride=self.hop_length,
             padding=0,
         )
@@ -1532,16 +1533,12 @@ class Spectral(nn.Module):
         )
 
         # Compute the STFT to get magnitude and phase
-        stft = self.stft.forward(x)
+        magnitude, phase = self.stft.forward(x)
 
         # Forward pass
-        stft = self._forward(stft)
+        magnitude = self._forward(magnitude)
 
         # Reconstruct the waveform from the magnitude and phase
-        real = stft[:, 0, :, :]
-        imag = stft[:, 1, :, :]
-        magnitude = torch.sqrt(real**2 + imag**2)
-        phase = torch.atan2(imag, real)
         x = self.stft.inverse(magnitude, phase)
 
         x = torchaudio.functional.resample(
@@ -1551,10 +1548,11 @@ class Spectral(nn.Module):
         )
         return x
 
-    def _forward(self, stft):
-        filters = self.filters(stft)
-        filtered_stft = stft * filters
-        return filtered_stft
+    def _forward(self, magnitude):
+        magnitude = magnitude.clamp(min=1e-3).log()
+        # filters = self.filters(magnitude)
+        magnitude = (magnitude).exp()
+        return magnitude
 
 
 class LightningSpectral(Model):
