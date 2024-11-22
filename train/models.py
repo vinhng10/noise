@@ -1430,6 +1430,7 @@ class STFT(torch.nn.Module):
         inverse_transform = inverse_transform[
             :, None, :, self.pad_amount : -self.pad_amount
         ]
+        inverse_transform = inverse_transform.clamp(min=-1.0, max=1.0)
         return inverse_transform
 
     @staticmethod
@@ -1494,8 +1495,6 @@ class Spectral(nn.Module):
         hop_length: Optional[int] = None,
         win_length: Optional[int] = None,
         window: str = "hann",
-        src_sampling_rate: int = 48000,
-        tgt_sampling_rate: int = 16000,
     ):
         super().__init__()
         self.n_fft = n_fft
@@ -1503,8 +1502,6 @@ class Spectral(nn.Module):
         self.win_length = win_length if win_length is not None else n_fft
         _window = torch.hann_window(self.win_length) if window == "hann" else window
         self.register_buffer("window", _window)
-        self.src_sampling_rate = src_sampling_rate
-        self.tgt_sampling_rate = tgt_sampling_rate
         self.stft = STFT(
             max_frames=max_frames,
             n_fft=self.n_fft,
@@ -1512,41 +1509,34 @@ class Spectral(nn.Module):
             win_length=self.win_length,
             window=window,
         )
-
         self.filters = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.Conv2d(1, 32, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 1, kernel_size=3, padding=1),
+            nn.ConvTranspose2d(32, 1, kernel_size=3, stride=2, padding=1),
         )
 
     def forward(self, waveforms):
-        x = torchaudio.functional.resample(
-            waveforms,
-            self.src_sampling_rate,
-            self.tgt_sampling_rate,
-        )
-
         # Compute the STFT to get magnitude and phase
-        magnitude, phase = self.stft.forward(x)
+        magnitude, phase = self.stft.forward(waveforms)
 
         # Forward pass
-        magnitude = self._forward(magnitude)
+        # magnitude = self._forward(magnitude)
 
         # Reconstruct the waveform from the magnitude and phase
         x = self.stft.inverse(magnitude, phase)
-
-        x = torchaudio.functional.resample(
-            x,
-            self.tgt_sampling_rate,
-            self.src_sampling_rate,
-        )
         return x
 
     def _forward(self, magnitude):
@@ -1564,8 +1554,6 @@ class LightningSpectral(Model):
         hop_length: Optional[int],
         win_length: Optional[int],
         window: str,
-        src_sampling_rate: int,
-        tgt_sampling_rate: int,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -1575,8 +1563,6 @@ class LightningSpectral(Model):
             hop_length,
             win_length,
             window,
-            src_sampling_rate,
-            tgt_sampling_rate,
         )
 
     def _shared_step(self, batch, batch_idx, stage):
