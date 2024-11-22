@@ -223,7 +223,7 @@ class TransformerEncoder(nn.Module):
 
 
 # CleanUNet architecture
-def padding(x, D, K, S):
+def padding(x, D, K, S, value=0):
     """padding zeroes to x so that denoised audio has the same length"""
 
     L = x.shape[-1]
@@ -237,7 +237,7 @@ def padding(x, D, K, S):
         L = (L - 1) * S + K
 
     L = int(L)
-    x = F.pad(x, (L - x.shape[-1], 0))
+    x = F.pad(x, (L - x.shape[-1], 0), value=value)
     return x
 
 
