@@ -58,7 +58,7 @@ const noiseFilter = (session) => {
         format,
         sampleRate: data.sampleRate,
         numberOfFrames: frames,
-        numberOfChannels: data.numberOfChannels,
+        numberOfChannels: 1,
         timestamp: data.timestamp,
         data: audioData,
       })
