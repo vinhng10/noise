@@ -72,22 +72,20 @@ fit:
     default_root_dir: null
   model:
     max_frames: 8000
-    n_fft: 512
-    hop_length: 64
-    win_length: 512
+    n_fft: 320
+    hop_length: 160
+    win_length: 320
     window: hann
-    src_sampling_rate: 48000
-    tgt_sampling_rate: 16000
   data:
     data_dir: ./data
     sampling_rate: 16000
-    length: 8000
-    num_samples: 5000
-    num_workers: 8
+    length: 0
+    num_samples: 10000
+    num_workers: 4
     batch_size: 128
     p: 0.3
   optimizer:
-    lr: 2e-4
+    lr: 1e-3
     betas:
       - 0.9
       - 0.999
@@ -101,8 +99,7 @@ fit:
     fused: null
   lr_scheduler:
     mode: min
-    factor: 0.8
-    patience: 300
+    factor: 0.5
+    patience: 200
     min_lr: 2e-4
     monitor: val_loss
-      

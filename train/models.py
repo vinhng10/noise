@@ -1391,12 +1391,13 @@ class STFT(torch.nn.Module):
         )
         window_sum[window_sum == 0] = 1
         window_sum = self.scale / window_sum
-        window_sum = torch.from_numpy(window_sum)
+        window_sum = torch.FloatTensor(window_sum)
 
-        self.register_buffer("forward_basis", forward_basis.float())
-        self.register_buffer("inverse_basis", inverse_basis.float())
+        self.register_buffer("forward_basis", forward_basis)
+        self.register_buffer("inverse_basis", inverse_basis)
         self.register_buffer("window_sum", window_sum)
 
+    @torch.no_grad()
     def forward(self, waveform):
         waveform = F.pad(
             waveform.squeeze(1), (self.pad_amount, self.pad_amount), mode="reflect"
@@ -1409,12 +1410,14 @@ class STFT(torch.nn.Module):
         real = forward_transform[:, : self.cutoff, :]
         imag = forward_transform[:, self.cutoff :, :]
 
-        magnitude = torch.sqrt(real**2 + imag**2)
+        log_magnitude = torch.sqrt(real**2 + imag**2).unsqueeze(1).clamp(min=1e-3).log()
         phase = torch.atan2(imag, real)
 
-        return magnitude, phase
+        return log_magnitude, phase
 
-    def inverse(self, magnitude, phase):
+    @torch.no_grad()
+    def inverse(self, log_magnitude, phase):
+        magnitude = log_magnitude.exp().squeeze(1)
         recombine_magnitude_phase = torch.cat(
             [magnitude * torch.cos(phase), magnitude * torch.sin(phase)], dim=1
         )
@@ -1509,41 +1512,50 @@ class Spectral(nn.Module):
             win_length=self.win_length,
             window=window,
         )
-        self.filters = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(32, 1, kernel_size=3, stride=2, padding=1),
+        self.filters = nn.ModuleList(
+            [
+                nn.Conv2d(1, 32, kernel_size=3, stride=2),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(32, 64, kernel_size=3, stride=2),
+                nn.BatchNorm2d(64),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(64, 128, kernel_size=3, stride=2),
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2),
+                nn.BatchNorm2d(64),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(32, 1, kernel_size=3, stride=2),
+            ]
         )
 
     def forward(self, waveforms):
         # Compute the STFT to get magnitude and phase
-        magnitude, phase = self.stft.forward(waveforms)
+        log_magnitudes, phases = self.stft.forward(waveforms)
 
-        # Forward pass
-        # magnitude = self._forward(magnitude)
+        # Apply filters
+        log_magnitudes = self._forward(log_magnitudes)
 
         # Reconstruct the waveform from the magnitude and phase
-        x = self.stft.inverse(magnitude, phase)
-        return x
+        waveforms = self.stft.inverse(log_magnitudes, phases)
 
-    def _forward(self, magnitude):
-        magnitude = magnitude.unsqueeze(1).clamp(min=1e-3).log()
-        filters = self.filters(magnitude)
-        magnitude = (magnitude * filters).exp().squeeze(1)
-        return magnitude
+        return waveforms
+    
+    def _forward(self, log_magnitudes):
+        H, W = log_magnitudes.shape[-2:]
+        filters = padding(log_magnitudes, 3, 3, 2, value=math.log(1e-3))
+        filters = padding(
+            filters.permute(0, 1, 3, 2), 3, 3, 2, value=math.log(1e-3)
+        ).permute(0, 1, 3, 2)
+        for layer in self.filters:
+            filters = layer(filters)
+        filters = filters[:, :, -H:, -W:]
+        log_magnitudes = (log_magnitudes * filters).clamp(min=math.log(1e-3))
+        return log_magnitudes
 
 
 class LightningSpectral(Model):
@@ -1567,10 +1579,10 @@ class LightningSpectral(Model):
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
-        noisy_stft = self.model.stft.forward(noisy_waveforms)
-        clean_stft = self.model.stft.forward(clean_waveforms)
-        enhanced_stft = self.model._forward(noisy_stft)
-        loss = F.l1_loss(enhanced_stft, clean_stft)
+        noisy_log_magnitudes, _ = self.model.stft.forward(noisy_waveforms.view(-1, 1, 1, 8000))
+        clean_log_magnitudes, _ = self.model.stft.forward(clean_waveforms.view(-1, 1, 1, 8000))
+        enhanced_log_magnitudes = self.model._forward(noisy_log_magnitudes)
+        loss = F.smooth_l1_loss(enhanced_log_magnitudes, clean_log_magnitudes, beta=1)
         self.log_dict(
             {f"{stage}_loss": loss},
             on_step=False,
