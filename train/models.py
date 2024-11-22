@@ -1323,12 +1323,15 @@ class VADLightningMobileNetV1(Model):
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
+        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
+        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
         enhanced_waveforms, vad = self.model._forward(noisy_waveforms)
-        enhanced_waveforms *= vad[..., None, None] > 0.0
+        enhanced_waveforms *= (1e4 * vad[..., None, None]).sigmoid()
         vad_loss = F.binary_cross_entropy_with_logits(
-            vad.squeeze(), clean_waveforms.any(dim=-1).float().squeeze()
+            vad.squeeze(),
+            ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
         )
-        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+        l1_loss = F.smooth_l1_loss(enhanced_waveforms, clean_waveforms, beta=0.5)
         mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
             enhanced_waveforms, clean_waveforms
         )
@@ -1511,7 +1514,7 @@ class Spectral(nn.Module):
         )
 
         self.filters = nn.Sequential(
-            nn.Conv2d(2, 32, kernel_size=3, padding=1),
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
@@ -1520,9 +1523,7 @@ class Spectral(nn.Module):
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 2, kernel_size=3, padding=1),
-            nn.BatchNorm2d(2),
-            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, kernel_size=3, padding=1),
         )
 
     def forward(self, waveforms):
@@ -1549,9 +1550,9 @@ class Spectral(nn.Module):
         return x
 
     def _forward(self, magnitude):
-        magnitude = magnitude.clamp(min=1e-3).log()
-        # filters = self.filters(magnitude)
-        magnitude = (magnitude).exp()
+        magnitude = magnitude.unsqueeze(1).clamp(min=1e-3).log()
+        filters = self.filters(magnitude)
+        magnitude = (magnitude * filters).exp().squeeze(1)
         return magnitude
 
 
