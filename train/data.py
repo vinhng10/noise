@@ -190,7 +190,7 @@ class ImpulseResponse(BaseWaveformTransform):
         ir, _ = load_sound_file(self.parameters["ir_file_path"], sample_rate)
         reverb_samples = fftconvolve(samples, ir, mode="full")
         reverb_samples = reverb_samples[: len(samples)]
-        
+
         # Compute RMS of input and output signals
         input_rms = np.sqrt(np.mean(samples**2))
         output_rms = np.sqrt(np.mean(reverb_samples**2))
@@ -449,7 +449,13 @@ class VADNoiseDataModule(NoiseDataModule):
         self.train_transforms = Compose(
             [
                 Gain(min_gain_db=-15, max_gain_db=5, p=1.0),
-                Shift(min_shift=-0.9, max_shift=0.9, rollover=False, p=p),
+                Shift(
+                    min_shift=-1.0,
+                    max_shift=1.0,
+                    rollover=False,
+                    fade_duration=0.0,
+                    p=p,
+                ),
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=-5.0,
@@ -457,12 +463,12 @@ class VADNoiseDataModule(NoiseDataModule):
                     p=1.0,
                 ),
                 Cut(length=length, is_val=False, p=1.0),
-                # JustNoise(
-                #     sounds_path=f"{data_dir}/train/noise",
-                #     min_snr_db=-5.0,
-                #     max_snr_db=30.0,
-                #     p=p,
-                # ),
+                JustNoise(
+                    sounds_path=f"{data_dir}/train/noise",
+                    min_snr_db=-5.0,
+                    max_snr_db=30.0,
+                    p=p,
+                ),
                 PolarityInversion(p=p),
                 AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 ImpulseResponse(sounds_path=f"{data_dir}/train/ir", p=0.5),
@@ -478,7 +484,13 @@ class VADNoiseDataModule(NoiseDataModule):
         self.val_transforms = Compose(
             [
                 Gain(min_gain_db=-15, max_gain_db=5, p=1.0),
-                Shift(min_shift=-0.9, max_shift=0.9, rollover=False, p=p),
+                Shift(
+                    min_shift=-1.0,
+                    max_shift=1.0,
+                    rollover=False,
+                    fade_duration=0.0,
+                    p=p,
+                ),
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/val/noise",
                     min_snr_db=-5.0,
@@ -486,12 +498,12 @@ class VADNoiseDataModule(NoiseDataModule):
                     p=1.0,
                 ),
                 Cut(length=length, is_val=True, p=1.0),
-                # JustNoise(
-                #     sounds_path=f"{data_dir}/val/noise",
-                #     min_snr_db=-5.0,
-                #     max_snr_db=30.0,
-                #     p=p,
-                # ),
+                JustNoise(
+                    sounds_path=f"{data_dir}/val/noise",
+                    min_snr_db=-5.0,
+                    max_snr_db=30.0,
+                    p=p,
+                ),
                 PolarityInversion(p=p),
                 AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 ImpulseResponse(sounds_path=f"{data_dir}/val/ir", p=0.5),
