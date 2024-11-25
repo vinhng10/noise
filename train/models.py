@@ -892,10 +892,14 @@ class VADMobileNetV1(nn.Module):
 
     def _forward(self, x):
         H, W = x.shape[-2:]
-        std = x.std(dim=-1, keepdim=True) + 1e-3
-        x = x / std
+        # std = x.std(dim=-1, keepdim=True) + 1e-3
+        # x = x / std
         x = padding(
-            x, self.encoder_n_layers + 1, self.kernel_size, self.stride, self.pad_value
+            x,
+            self.encoder_n_layers + 1,
+            self.kernel_size,
+            self.stride,
+            self.pad_value,
         )
 
         # encoder
@@ -920,7 +924,7 @@ class VADMobileNetV1(nn.Module):
             x = x + skip_i[:, :, :, -x.shape[-1] :]
             x = upsampling_block(x)
 
-        x = x[:, :, -H:, -W:] * std
+        x = x[:, :, -H:, -W:]  # * std
         return x, vad
 
 
