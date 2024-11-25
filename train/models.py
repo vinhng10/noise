@@ -9,7 +9,7 @@ import torchaudio
 from librosa import util as librosa_util
 from librosa.util import pad_center
 from scipy.signal import get_window
-from torch.autograd import Variable
+from torch.nn.common_types import _size_2_t
 
 
 # Teacher:
@@ -224,20 +224,44 @@ class TransformerEncoder(nn.Module):
 
 # CleanUNet architecture
 def padding(x, D, K, S, value=0):
-    """padding zeroes to x so that denoised audio has the same length"""
+    """padding zeroes to x so that denoised audio has the same height and width"""
 
-    L = x.shape[-1]
+    H, W = x.shape[-2:]
+
+    if isinstance(K, int):
+        K_h, K_w = K, K
+    else:
+        K_h, K_w = K
+
+    if isinstance(S, int):
+        S_h, S_w = S, S
+    else:
+        S_h, S_w = S
+
+    # Calculate required height
+    H_out = H
     for _ in range(D):
-        if L < K:
-            L = 1
+        if H_out < K_h:
+            H_out = 1
         else:
-            L = 1 + np.ceil((L - K) / S)
+            H_out = 1 + np.ceil((H_out - K_h) / S_h)
 
     for _ in range(D):
-        L = (L - 1) * S + K
+        H_out = (H_out - 1) * S_h + K_h
 
-    L = int(L)
-    x = F.pad(x, (L - x.shape[-1], 0), value=value)
+    # Calculate required width
+    W_out = W
+    for _ in range(D):
+        if W_out < K_w:
+            W_out = 1
+        else:
+            W_out = 1 + np.ceil((W_out - K_w) / S_w)
+
+    for _ in range(D):
+        W_out = (W_out - 1) * S_w + K_w
+
+    H_out, W_out = int(H_out), int(W_out)
+    x = F.pad(x, (W_out - W, 0, H_out - H, 0), value=value)
     return x
 
 
@@ -632,9 +656,9 @@ class DepthwiseSeparableConv(nn.Module):
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=in_channels,
-                kernel_size=[1, kernel_size],
-                stride=[1, stride],
-                padding=[0, padding],
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
                 groups=in_channels,
                 bias=bias,
             ),
@@ -672,10 +696,10 @@ class DepthwiseSeparableConvTranspose(nn.Module):
             nn.ConvTranspose2d(
                 in_channels=in_channels,
                 out_channels=in_channels,
-                kernel_size=[1, kernel_size],
-                stride=[1, stride],
-                padding=[0, padding],
-                output_padding=[0, output_padding],
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                output_padding=output_padding,
                 groups=in_channels,
                 bias=bias,
             ),
@@ -770,142 +794,6 @@ class KnowledgeDistillation(Model):
         return loss
 
 
-class MobileNetV1(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        max_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
-        encoder_n_layers: int,
-        nhead: int,
-        num_layers: int,
-        dropout: float,
-        bias: bool,
-        src_sampling_rate: int,
-        tgt_sampling_rate: int,
-    ) -> None:
-        super().__init__()
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.encoder_n_layers = encoder_n_layers
-        self.src_sampling_rate = src_sampling_rate
-        self.tgt_sampling_rate = tgt_sampling_rate
-
-        # encoder and decoder
-        self.encoder = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Conv2d(
-                        in_channels,
-                        hidden_channels,
-                        kernel_size=(1, kernel_size),
-                        stride=(1, stride),
-                        padding=(0, padding),
-                        bias=bias,
-                    ),
-                    nn.ReLU(inplace=True),
-                )
-            ]
-        )
-        self.decoder = nn.ModuleList(
-            [
-                nn.ConvTranspose2d(
-                    hidden_channels,
-                    out_channels,
-                    kernel_size=(1, kernel_size),
-                    stride=(1, stride),
-                    padding=(0, padding),
-                    output_padding=(0, 0),
-                    bias=bias,
-                )
-            ]
-        )
-
-        for i in range(encoder_n_layers):
-            in_channels = hidden_channels
-            out_channels = hidden_channels
-            hidden_channels = min(hidden_channels * 2, max_channels)
-            self.encoder.append(
-                DepthwiseSeparableConv(
-                    in_channels, hidden_channels, kernel_size, stride, padding, bias
-                )
-            )
-            self.decoder.insert(
-                0,
-                DepthwiseSeparableConvTranspose(
-                    hidden_channels,
-                    out_channels,
-                    kernel_size,
-                    stride,
-                    padding,
-                    0,
-                    bias,
-                    i == 0,
-                ),
-            )
-
-        self.bottleneck_attention = TransformerEncoder(
-            d_word_vec=hidden_channels,
-            n_layers=num_layers,
-            n_head=nhead,
-            d_k=hidden_channels // nhead,
-            d_v=hidden_channels // nhead,
-            d_model=hidden_channels,
-            d_inner=hidden_channels,
-            dropout=dropout,
-            n_position=0,
-            scale_emb=False,
-        )
-
-    def forward(self, waveforms):
-        x = torchaudio.functional.resample(
-            waveforms,
-            self.src_sampling_rate,
-            self.tgt_sampling_rate,
-        )
-
-        x = self._forward(x)
-
-        x = torchaudio.functional.resample(
-            x,
-            self.tgt_sampling_rate,
-            self.src_sampling_rate,
-        )
-        return x
-
-    def _forward(self, x):
-        L = x.shape[-1]
-        std = x.std(dim=-1, keepdim=True) + 1e-3
-        x = x / std
-        x = padding(x, self.encoder_n_layers + 1, self.kernel_size, self.stride)
-
-        # encoder
-        downs = []
-        for downsampling_block in self.encoder:
-            x = downsampling_block(x)
-            downs.append(x)
-        downs = downs[::-1]
-
-        x = x.squeeze(2).permute(0, 2, 1)
-        x = self.bottleneck_attention(x, None)
-        x = x.permute(0, 2, 1).unsqueeze(2)
-
-        # decoder
-        ups = []
-        for i, upsampling_block in enumerate(self.decoder):
-            ups.append(x)
-            skip_i = downs[i]
-            x = x + skip_i[:, :, :, -x.shape[-1] :]
-            x = upsampling_block(x)
-
-        x = x[:, :, :, -L:] * std
-        return x
-
-
 class VADMobileNetV1(nn.Module):
     def __init__(
         self,
@@ -913,19 +801,21 @@ class VADMobileNetV1(nn.Module):
         hidden_channels: int,
         max_channels: int,
         out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
+        kernel_size: _size_2_t,
+        stride: _size_2_t,
+        padding: _size_2_t,
         encoder_n_layers: int,
         nhead: int,
         num_layers: int,
         dropout: float,
         bias: bool,
+        pad_value: float,
     ) -> None:
         super().__init__()
         self.kernel_size = kernel_size
         self.stride = stride
         self.encoder_n_layers = encoder_n_layers
+        self.pad_value = pad_value
 
         # encoder and decoder
         self.encoder = nn.ModuleList(
@@ -934,9 +824,9 @@ class VADMobileNetV1(nn.Module):
                     nn.Conv2d(
                         in_channels,
                         hidden_channels,
-                        kernel_size=(1, kernel_size),
-                        stride=(1, stride),
-                        padding=(0, padding),
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
                         bias=bias,
                     ),
                     nn.BatchNorm2d(hidden_channels),
@@ -949,9 +839,9 @@ class VADMobileNetV1(nn.Module):
                 nn.ConvTranspose2d(
                     hidden_channels,
                     out_channels,
-                    kernel_size=(1, kernel_size),
-                    stride=(1, stride),
-                    padding=(0, padding),
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
                     output_padding=(0, 0),
                     bias=bias,
                 )
@@ -997,14 +887,16 @@ class VADMobileNetV1(nn.Module):
 
     def forward(self, waveforms):
         x, vad = self._forward(waveforms)
-        x *= (1e4 * vad).sigmoid()
+        x *= (1e4 * vad[..., None, None]).sigmoid()
         return x
 
     def _forward(self, x):
-        L = x.shape[-1]
+        H, W = x.shape[-2:]
         std = x.std(dim=-1, keepdim=True) + 1e-3
         x = x / std
-        x = padding(x, self.encoder_n_layers + 1, self.kernel_size, self.stride)
+        x = padding(
+            x, self.encoder_n_layers + 1, self.kernel_size, self.stride, self.pad_value
+        )
 
         # encoder
         downs = []
@@ -1014,10 +906,11 @@ class VADMobileNetV1(nn.Module):
         downs = downs[::-1]
 
         # attention & vad
-        x = x.squeeze(2).permute(0, 2, 1)
+        b, c, h, w = x.shape
+        x = x.view(b, c, -1).permute(0, 2, 1)
         x = self.bottleneck_attention(x, None)
         vad = self.vad(x[:, 0, :])
-        x = x.permute(0, 2, 1).unsqueeze(2)
+        x = x.permute(0, 2, 1).view(b, c, h, w)
 
         # decoder
         ups = []
@@ -1027,7 +920,7 @@ class VADMobileNetV1(nn.Module):
             x = x + skip_i[:, :, :, -x.shape[-1] :]
             x = upsampling_block(x)
 
-        x = x[:, :, :, -L:] * std
+        x = x[:, :, -H:, -W:] * std
         return x, vad
 
 
@@ -1222,49 +1115,6 @@ class GAN(pl.LightningModule):
         )
 
 
-class LightningMobileNetV1(Model):
-
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        max_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
-        encoder_n_layers: int,
-        nhead: int,
-        num_layers: int,
-        dropout: float,
-        bias: bool,
-        src_sampling_rate: int,
-        tgt_sampling_rate: int,
-        mr_stft_lambda: float,
-        fft_sizes: List[int],
-        hop_lengths: List[int],
-        win_lengths: List[int],
-    ) -> None:
-        super().__init__()
-        self.save_hyperparameters()
-        self.model = MobileNetV1(
-            in_channels,
-            hidden_channels,
-            max_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            padding,
-            encoder_n_layers,
-            nhead,
-            num_layers,
-            dropout,
-            bias,
-            src_sampling_rate,
-            tgt_sampling_rate,
-        )
-
-
 class VADLightningMobileNetV1(Model):
 
     def __init__(
@@ -1273,14 +1123,15 @@ class VADLightningMobileNetV1(Model):
         hidden_channels: int,
         max_channels: int,
         out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
+        kernel_size: _size_2_t,
+        stride: _size_2_t,
+        padding: _size_2_t,
         encoder_n_layers: int,
         nhead: int,
         num_layers: int,
         dropout: float,
         bias: bool,
+        pad_value: float,
         mr_stft_lambda: float,
         fft_sizes: List[int],
         hop_lengths: List[int],
@@ -1301,6 +1152,7 @@ class VADLightningMobileNetV1(Model):
             num_layers,
             dropout,
             bias,
+            pad_value,
         )
 
     def _shared_step(self, batch, batch_idx, stage):
@@ -1308,7 +1160,7 @@ class VADLightningMobileNetV1(Model):
         noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
         clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
         enhanced_waveforms, vad = self.model._forward(noisy_waveforms)
-        enhanced_waveforms *= (1e4 * vad[..., None, None]).sigmoid()
+        # enhanced_waveforms *= (1e4 * vad[..., None, None]).sigmoid()
         vad_loss = F.binary_cross_entropy_with_logits(
             vad.squeeze(),
             ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
@@ -1472,77 +1324,22 @@ class STFT(torch.nn.Module):
         return x
 
 
-class Spectral(nn.Module):
-    def __init__(
-        self,
-        max_frames: int,
-        n_fft: int,
-        hop_length: Optional[int] = None,
-        win_length: Optional[int] = None,
-        window: str = "hann",
-    ):
-        super().__init__()
-        self.n_fft = n_fft
-        self.hop_length = hop_length if hop_length is not None else n_fft // 4
-        self.win_length = win_length if win_length is not None else n_fft
-        _window = torch.hann_window(self.win_length) if window == "hann" else window
-        self.register_buffer("window", _window)
-        self.stft = STFT(
-            max_frames=max_frames,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-            window=window,
-        )
-        self.filters = nn.ModuleList(
-            [
-                nn.Conv2d(1, 32, kernel_size=3, stride=2),
-                nn.BatchNorm2d(32),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(32, 64, kernel_size=3, stride=2),
-                nn.BatchNorm2d(64),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(64, 128, kernel_size=3, stride=2),
-                nn.BatchNorm2d(128),
-                nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2),
-                nn.BatchNorm2d(64),
-                nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2),
-                nn.BatchNorm2d(32),
-                nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(32, 1, kernel_size=3, stride=2),
-            ]
-        )
-
-    def forward(self, waveforms):
-        # Compute the STFT to get magnitude and phase
-        log_magnitudes, phases = self.stft.forward(waveforms)
-
-        # Apply filters
-        log_magnitudes = self._forward(log_magnitudes)
-
-        # Reconstruct the waveform from the magnitude and phase
-        waveforms = self.stft.inverse(log_magnitudes, phases)
-
-        return waveforms
-    
-    def _forward(self, log_magnitudes):
-        H, W = log_magnitudes.shape[-2:]
-        filters = padding(log_magnitudes, 3, 3, 2, value=math.log(1e-3))
-        filters = padding(
-            filters.permute(0, 1, 3, 2), 3, 3, 2, value=math.log(1e-3)
-        ).permute(0, 1, 3, 2)
-        for layer in self.filters:
-            filters = layer(filters)
-        filters = filters[:, :, -H:, -W:]
-        log_magnitudes = (log_magnitudes * filters).clamp(min=math.log(1e-3))
-        return log_magnitudes
-
-
 class LightningSpectral(Model):
     def __init__(
         self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        out_channels: int,
+        kernel_size: _size_2_t,
+        stride: _size_2_t,
+        padding: _size_2_t,
+        encoder_n_layers: int,
+        nhead: int,
+        num_layers: int,
+        dropout: float,
+        bias: bool,
+        pad_value: float,
         max_frames: int,
         n_fft: int,
         hop_length: Optional[int],
@@ -1551,20 +1348,62 @@ class LightningSpectral(Model):
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = Spectral(
-            max_frames,
-            n_fft,
-            hop_length,
-            win_length,
-            window,
+        hop_length = hop_length if hop_length is not None else n_fft // 4
+        win_length = win_length if win_length is not None else n_fft
+        self.stft = STFT(
+            max_frames=max_frames,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            window=window,
         )
+        self.model = VADMobileNetV1(
+            in_channels,
+            hidden_channels,
+            max_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            encoder_n_layers,
+            nhead,
+            num_layers,
+            dropout,
+            bias,
+            pad_value,
+        )
+
+    def forward(self, waveforms):
+        # Compute the STFT to get magnitude and phase
+        log_magnitudes, phases = self.stft.forward(waveforms)
+
+        # Apply filters
+        log_magnitudes, vad = self._forward(log_magnitudes)
+
+        # Reconstruct the waveform from the magnitude and phase
+        waveforms = self.stft.inverse(log_magnitudes, phases)
+        waveforms *= (1e4 * vad[..., None, None]).sigmoid()
+
+        return waveforms
+
+    def _forward(self, log_magnitudes):
+        filters, vad = self.model._forward(log_magnitudes)
+        log_magnitudes = (log_magnitudes * filters).clamp(min=math.log(1e-3))
+        return log_magnitudes, vad
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
-        noisy_log_magnitudes, _ = self.model.stft.forward(noisy_waveforms.view(-1, 1, 1, 8000))
-        clean_log_magnitudes, _ = self.model.stft.forward(clean_waveforms.view(-1, 1, 1, 8000))
-        enhanced_log_magnitudes = self.model._forward(noisy_log_magnitudes)
-        loss = F.smooth_l1_loss(enhanced_log_magnitudes, clean_log_magnitudes, beta=1)
+        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
+        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
+        noisy_log_magnitudes, _ = self.stft.forward(noisy_waveforms)
+        clean_log_magnitudes, _ = self.stft.forward(clean_waveforms)
+        enhanced_log_magnitudes, vad = self._forward(noisy_log_magnitudes)
+        l1_loss = F.l1_loss(enhanced_log_magnitudes, clean_log_magnitudes)
+        vad_loss = F.binary_cross_entropy_with_logits(
+            vad.squeeze(),
+            ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
+        )
+        loss = l1_loss + vad_loss
         self.log_dict(
             {f"{stage}_loss": loss},
             on_step=False,

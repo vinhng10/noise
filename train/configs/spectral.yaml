@@ -71,6 +71,19 @@ fit:
     reload_dataloaders_every_n_epochs: 0
     default_root_dir: null
   model:
+    in_channels: 1
+    hidden_channels: 32
+    max_channels: 256
+    out_channels: 1
+    kernel_size: 3
+    stride: 2
+    padding: 0
+    encoder_n_layers: 4
+    nhead: 4
+    num_layers: 1
+    dropout: 0.0
+    bias: false
+    pad_value: -6.907755278982137  # math.log(1e-3)
     max_frames: 8000
     n_fft: 320
     hop_length: 160
@@ -85,7 +98,7 @@ fit:
     batch_size: 128
     p: 0.3
   optimizer:
-    lr: 1e-3
+    lr: 5e-4
     betas:
       - 0.9
       - 0.999
@@ -97,9 +110,3 @@ fit:
     capturable: false
     differentiable: false
     fused: null
-  lr_scheduler:
-    mode: min
-    factor: 0.5
-    patience: 200
-    min_lr: 2e-4
-    monitor: val_loss
