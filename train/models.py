@@ -921,15 +921,11 @@ class VADMobileNetV1(nn.Module):
         num_layers: int,
         dropout: float,
         bias: bool,
-        src_sampling_rate: int,
-        tgt_sampling_rate: int,
     ) -> None:
         super().__init__()
         self.kernel_size = kernel_size
         self.stride = stride
         self.encoder_n_layers = encoder_n_layers
-        self.src_sampling_rate = src_sampling_rate
-        self.tgt_sampling_rate = tgt_sampling_rate
 
         # encoder and decoder
         self.encoder = nn.ModuleList(
@@ -1000,18 +996,8 @@ class VADMobileNetV1(nn.Module):
         self.vad = nn.Linear(hidden_channels, 1)
 
     def forward(self, waveforms):
-        x = torchaudio.functional.resample(
-            waveforms,
-            self.src_sampling_rate,
-            self.tgt_sampling_rate,
-        )
-        x, vad = self._forward(x)
+        x, vad = self._forward(waveforms)
         x *= (1e4 * vad).sigmoid()
-        x = torchaudio.functional.resample(
-            x,
-            self.tgt_sampling_rate,
-            self.src_sampling_rate,
-        )
         return x
 
     def _forward(self, x):
@@ -1295,8 +1281,6 @@ class VADLightningMobileNetV1(Model):
         num_layers: int,
         dropout: float,
         bias: bool,
-        src_sampling_rate: int,
-        tgt_sampling_rate: int,
         mr_stft_lambda: float,
         fft_sizes: List[int],
         hop_lengths: List[int],
@@ -1317,8 +1301,6 @@ class VADLightningMobileNetV1(Model):
             num_layers,
             dropout,
             bias,
-            src_sampling_rate,
-            tgt_sampling_rate,
         )
 
     def _shared_step(self, batch, batch_idx, stage):
