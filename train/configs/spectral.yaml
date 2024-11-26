@@ -12,7 +12,7 @@ fit:
       init_args:
         save_dir: ./logs
         name: null
-        version: spectral-1.0.0
+        version: spectral-3.0.0
         log_graph: false
         default_hp_metric: false
         prefix: ""
@@ -78,12 +78,12 @@ fit:
     kernel_size: 3
     stride: 2
     padding: 0
-    encoder_n_layers: 4
-    nhead: 4
-    num_layers: 1
+    encoder_n_layers: 2
+    nhead: 8
+    num_layers: 2
     dropout: 0.0
     bias: false
-    pad_value: -6.907755278982137  # math.log(1e-3)
+    pad_value: -2.4538776394910684  # (math.log(1e-3) + 2) * 0.5
     max_frames: 8000
     n_fft: 320
     hop_length: 160

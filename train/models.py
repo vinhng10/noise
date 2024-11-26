@@ -489,11 +489,11 @@ class Model(pl.LightningModule):
             )
 
             # Spectral convergence loss:
-            sc_loss = torch.norm(y_mag - x_mag, p="fro") / torch.norm(y_mag, p="fro")
+            # sc_loss = torch.norm(y_mag - x_mag, p="fro") / torch.norm(y_mag, p="fro")
             # Log STFT magnitude loss:
             log_mag_loss = F.l1_loss(torch.log(y_mag), torch.log(x_mag))
 
-            loss += sc_loss + log_mag_loss
+            loss += log_mag_loss
         return loss
 
 
@@ -892,8 +892,6 @@ class VADMobileNetV1(nn.Module):
 
     def _forward(self, x):
         H, W = x.shape[-2:]
-        # std = x.std(dim=-1, keepdim=True) + 1e-3
-        # x = x / std
         x = padding(
             x,
             self.encoder_n_layers + 1,
@@ -924,7 +922,7 @@ class VADMobileNetV1(nn.Module):
             x = x + skip_i[:, :, :, -x.shape[-1] :]
             x = upsampling_block(x)
 
-        x = x[:, :, -H:, -W:]  # * std
+        x = x[:, :, -H:, -W:]
         return x, vad
 
 
@@ -1206,10 +1204,10 @@ class STFT(torch.nn.Module):
                 np.imag(fourier_basis[: self.cutoff, :]),
             ]
         )
-        forward_basis = torch.FloatTensor(fourier_basis[:, None, :])
+        forward_basis = torch.FloatTensor(fourier_basis[:, None, :]).detach()
         inverse_basis = torch.FloatTensor(
             np.linalg.pinv(self.scale * fourier_basis).T[:, None, :]
-        )
+        ).detach()
         if window is not None:
             assert n_fft >= win_length
             # get window and zero center pad it to n_fft
@@ -1229,13 +1227,12 @@ class STFT(torch.nn.Module):
         )
         window_sum[window_sum == 0] = 1
         window_sum = self.scale / window_sum
-        window_sum = torch.FloatTensor(window_sum)
+        window_sum = torch.FloatTensor(window_sum).detach()
 
         self.register_buffer("forward_basis", forward_basis)
         self.register_buffer("inverse_basis", inverse_basis)
         self.register_buffer("window_sum", window_sum)
 
-    @torch.no_grad()
     def forward(self, waveform):
         waveform = F.pad(
             waveform.squeeze(1), (self.pad_amount, self.pad_amount), mode="reflect"
@@ -1253,7 +1250,6 @@ class STFT(torch.nn.Module):
 
         return log_magnitude, phase
 
-    @torch.no_grad()
     def inverse(self, log_magnitude, phase):
         magnitude = log_magnitude.exp().squeeze(1)
         recombine_magnitude_phase = torch.cat(
@@ -1391,25 +1387,42 @@ class LightningSpectral(Model):
         return waveforms
 
     def _forward(self, log_magnitudes):
+        log_magnitudes = (log_magnitudes + 2) * 0.5
         filters, vad = self.model._forward(log_magnitudes)
-        log_magnitudes = (log_magnitudes * filters).clamp(min=math.log(1e-3))
+        log_magnitudes = (log_magnitudes * filters) * 2 - 2
         return log_magnitudes, vad
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
         noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
         clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
-        noisy_log_magnitudes, _ = self.stft.forward(noisy_waveforms)
+        noisy_log_magnitudes, phases = self.stft.forward(noisy_waveforms)
         clean_log_magnitudes, _ = self.stft.forward(clean_waveforms)
         enhanced_log_magnitudes, vad = self._forward(noisy_log_magnitudes)
-        l1_loss = F.l1_loss(enhanced_log_magnitudes, clean_log_magnitudes)
+
+        # Log-magnitude loss
+        spectral_loss = F.l1_loss(enhanced_log_magnitudes, clean_log_magnitudes)
+
+        # Voice activity detection loss
         vad_loss = F.binary_cross_entropy_with_logits(
             vad.squeeze(),
             ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
         )
-        loss = l1_loss + vad_loss
+
+        # Waveform loss
+        enhanced_waveforms = self.stft.inverse(enhanced_log_magnitudes, phases)
+        waveform_loss = F.smooth_l1_loss(
+            enhanced_waveforms, clean_waveforms[:, 0, 0, :], beta=0.5
+        )
+
+        loss = waveform_loss + spectral_loss + vad_loss
         self.log_dict(
-            {f"{stage}_loss": loss},
+            {
+                f"{stage}_loss": loss,
+                f"{stage}_vad_loss": vad_loss,
+                f"{stage}_waveform_loss": waveform_loss,
+                f"{stage}_spectral_loss": spectral_loss,
+            },
             on_step=False,
             on_epoch=True,
             prog_bar=True,
