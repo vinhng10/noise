@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import math
 import lightning.pytorch as pl
 import torch
@@ -9,7 +9,10 @@ import torchaudio
 from librosa import util as librosa_util
 from librosa.util import pad_center
 from scipy.signal import get_window
+from torch import Tensor
 from torch.nn.common_types import _size_2_t
+from torchvision.models._utils import _make_divisible
+from torchvision.ops.misc import ConvNormActivation, Conv2dNormActivation
 
 
 # Teacher:
@@ -222,6 +225,190 @@ class TransformerEncoder(nn.Module):
         return enc_output
 
 
+class DepthwiseSeparableConv(nn.Module):
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias):
+        super().__init__()
+        self.module = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=in_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                groups=in_channels,
+                bias=bias,
+            ),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=1,
+                bias=bias,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.module(x)
+
+
+class DepthwiseSeparableConvTranspose(nn.Module):
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        output_padding,
+        bias,
+        is_output=False,
+    ):
+        super().__init__()
+        self.module = nn.Sequential(
+            nn.ConvTranspose2d(
+                in_channels=in_channels,
+                out_channels=in_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                output_padding=output_padding,
+                groups=in_channels,
+                bias=bias,
+            ),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=1,
+                bias=bias,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True) if not is_output else nn.Identity(),
+        )
+
+    def forward(self, x):
+        return self.module(x)
+
+
+class ConvTranspose2dNormActivation(ConvNormActivation):
+    """
+    Configurable block used for Convolution2d-Normalization-Activation blocks.
+
+    Args:
+        in_channels (int): Number of channels in the input image
+        out_channels (int): Number of channels produced by the Convolution-Normalization-Activation block
+        kernel_size: (int, optional): Size of the convolving kernel. Default: 3
+        stride (int, optional): Stride of the convolution. Default: 1
+        padding (int, tuple or str, optional): Padding added to all four sides of the input. Default: None, in which case it will be calculated as ``padding = (kernel_size - 1) // 2 * dilation``
+        groups (int, optional): Number of blocked connections from input channels to output channels. Default: 1
+        norm_layer (Callable[..., torch.nn.Module], optional): Norm layer that will be stacked on top of the convolution layer. If ``None`` this layer won't be used. Default: ``torch.nn.BatchNorm2d``
+        activation_layer (Callable[..., torch.nn.Module], optional): Activation function which will be stacked on top of the normalization layer (if not None), otherwise on top of the conv layer. If ``None`` this layer won't be used. Default: ``torch.nn.ReLU``
+        dilation (int): Spacing between kernel elements. Default: 1
+        inplace (bool): Parameter for the activation layer, which can optionally do the operation in-place. Default ``True``
+        bias (bool, optional): Whether to use bias in the convolution layer. By default, biases are included if ``norm_layer is None``.
+
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, int]] = 3,
+        stride: Union[int, Tuple[int, int]] = 1,
+        padding: Optional[Union[int, Tuple[int, int], str]] = None,
+        groups: int = 1,
+        norm_layer: Optional[Callable[..., torch.nn.Module]] = torch.nn.BatchNorm2d,
+        activation_layer: Optional[Callable[..., torch.nn.Module]] = torch.nn.ReLU,
+        dilation: Union[int, Tuple[int, int]] = 1,
+        inplace: Optional[bool] = True,
+        bias: Optional[bool] = None,
+    ) -> None:
+
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            groups,
+            norm_layer,
+            activation_layer,
+            dilation,
+            inplace,
+            bias,
+            nn.ConvTranspose2d,
+        )
+
+
+class InvertedResidual(nn.Module):
+    def __init__(
+        self,
+        inp: int,
+        oup: int,
+        stride: int,
+        expand_ratio: int,
+        dw_layer: Optional[Callable[..., nn.Module]] = None,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+    ) -> None:
+        super().__init__()
+        self.stride = stride
+        if stride not in [1, 2]:
+            raise ValueError(f"stride should be 1 or 2 instead of {stride}")
+
+        if dw_layer is None:
+            dw_layer = Conv2dNormActivation
+
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+
+        hidden_dim = int(round(inp * expand_ratio))
+        self.use_res_connect = self.stride == 1 and inp == oup
+
+        layers: List[nn.Module] = []
+        if expand_ratio != 1:
+            # pw
+            layers.append(
+                Conv2dNormActivation(
+                    inp,
+                    hidden_dim,
+                    kernel_size=1,
+                    norm_layer=norm_layer,
+                    activation_layer=nn.ReLU6,
+                )
+            )
+        layers.extend(
+            [
+                # dw
+                dw_layer(
+                    hidden_dim,
+                    hidden_dim,
+                    stride=stride,
+                    groups=hidden_dim,
+                    norm_layer=norm_layer,
+                    activation_layer=nn.ReLU6,
+                ),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                norm_layer(oup),
+            ]
+        )
+        self.conv = nn.Sequential(*layers)
+        self.out_channels = oup
+        self._is_cn = stride > 1
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.use_res_connect:
+            return x + self.conv(x)
+        else:
+            return self.conv(x)
+
+
 # CleanUNet architecture
 def padding(x, D, K, S, value=0):
     """padding zeroes to x so that denoised audio has the same height and width"""
@@ -273,161 +460,6 @@ def weight_scaling_init(layer):
     alpha = 10.0 * w.std()
     layer.weight.data /= torch.sqrt(alpha)
     layer.bias.data /= torch.sqrt(alpha)
-
-
-class OriginalCleanUNet(nn.Module):
-    """CleanUNet architecture."""
-
-    def __init__(
-        self,
-        channels_input=1,
-        channels_output=1,
-        channels_H=64,
-        max_H=768,
-        encoder_n_layers=8,
-        kernel_size=4,
-        stride=2,
-        tsfm_n_layers=3,
-        tsfm_n_head=8,
-        tsfm_d_model=512,
-        tsfm_d_inner=2048,
-    ):
-        """
-        Parameters:
-        channels_input (int):   input channels
-        channels_output (int):  output channels
-        channels_H (int):       middle channels H that controls capacity
-        max_H (int):            maximum H
-        encoder_n_layers (int): number of encoder/decoder layers D
-        kernel_size (int):      kernel size K
-        stride (int):           stride S
-        tsfm_n_layers (int):    number of self attention blocks N
-        tsfm_n_head (int):      number of heads in each self attention block
-        tsfm_d_model (int):     d_model of self attention
-        tsfm_d_inner (int):     d_inner of self attention
-        """
-
-        super(OriginalCleanUNet, self).__init__()
-
-        self.channels_input = channels_input
-        self.channels_output = channels_output
-        self.channels_H = channels_H
-        self.max_H = max_H
-        self.encoder_n_layers = encoder_n_layers
-        self.kernel_size = kernel_size
-        self.stride = stride
-
-        self.tsfm_n_layers = tsfm_n_layers
-        self.tsfm_n_head = tsfm_n_head
-        self.tsfm_d_model = tsfm_d_model
-        self.tsfm_d_inner = tsfm_d_inner
-
-        # encoder and decoder
-        self.encoder = nn.ModuleList()
-        self.decoder = nn.ModuleList()
-
-        for i in range(encoder_n_layers):
-            self.encoder.append(
-                nn.Sequential(
-                    nn.Conv1d(channels_input, channels_H, kernel_size, stride),
-                    nn.ReLU(),
-                    nn.Conv1d(channels_H, channels_H * 2, 1),
-                    nn.GLU(dim=1),
-                )
-            )
-            channels_input = channels_H
-
-            if i == 0:
-                # no relu at end
-                self.decoder.append(
-                    nn.Sequential(
-                        nn.Conv1d(channels_H, channels_H * 2, 1),
-                        nn.GLU(dim=1),
-                        nn.ConvTranspose1d(
-                            channels_H, channels_output, kernel_size, stride
-                        ),
-                    )
-                )
-            else:
-                self.decoder.insert(
-                    0,
-                    nn.Sequential(
-                        nn.Conv1d(channels_H, channels_H * 2, 1),
-                        nn.GLU(dim=1),
-                        nn.ConvTranspose1d(
-                            channels_H, channels_output, kernel_size, stride
-                        ),
-                        nn.ReLU(),
-                    ),
-                )
-            channels_output = channels_H
-
-            # double H but keep below max_H
-            channels_H *= 2
-            channels_H = min(channels_H, max_H)
-
-        # self attention block
-        self.tsfm_conv1 = nn.Conv1d(channels_output, tsfm_d_model, kernel_size=1)
-        self.tsfm_encoder = TransformerEncoder(
-            d_word_vec=tsfm_d_model,
-            n_layers=tsfm_n_layers,
-            n_head=tsfm_n_head,
-            d_k=tsfm_d_model // tsfm_n_head,
-            d_v=tsfm_d_model // tsfm_n_head,
-            d_model=tsfm_d_model,
-            d_inner=tsfm_d_inner,
-            dropout=0.0,
-            n_position=0,
-            scale_emb=False,
-        )
-        self.tsfm_conv2 = nn.Conv1d(tsfm_d_model, channels_output, kernel_size=1)
-
-        # weight scaling initialization
-        for layer in self.modules():
-            if isinstance(layer, (nn.Conv1d, nn.ConvTranspose1d)):
-                weight_scaling_init(layer)
-
-    def forward(self, noisy_audio):
-        # (B, L) -> (B, C, L)
-        if len(noisy_audio.shape) == 2:
-            noisy_audio = noisy_audio.unsqueeze(1)
-        B, C, L = noisy_audio.shape
-        assert C == 1
-
-        # normalization and padding
-        std = noisy_audio.std(dim=2, keepdim=True) + 1e-3
-        noisy_audio /= std
-        x = padding(noisy_audio, self.encoder_n_layers, self.kernel_size, self.stride)
-
-        # encoder
-        skip_connections = []
-        for downsampling_block in self.encoder:
-            x = downsampling_block(x)
-            skip_connections.append(x)
-        skip_connections = skip_connections[::-1]
-
-        # attention mask for causal inference; for non-causal, set attn_mask to None
-        len_s = x.shape[-1]  # length at bottleneck
-        attn_mask = (
-            1 - torch.triu(torch.ones((1, len_s, len_s), device=x.device), diagonal=1)
-        ).bool()
-
-        x = self.tsfm_conv1(x)  # C 1024 -> 512
-        x = x.permute(0, 2, 1)
-        x = self.tsfm_encoder(x, src_mask=attn_mask)
-        x = x.permute(0, 2, 1)
-        x = self.tsfm_conv2(x)  # C 512 -> 1024
-
-        # decoder
-        ups = []
-        for i, upsampling_block in enumerate(self.decoder):
-            ups.append(x)
-            skip_i = skip_connections[i]
-            x += skip_i[:, :, : x.shape[-1]]
-            x = upsampling_block(x)
-
-        x = x[:, :, :L] * std
-        return x
 
 
 # Model Definition:
@@ -495,6 +527,197 @@ class Model(pl.LightningModule):
 
             loss += log_mag_loss
         return loss
+
+
+# class Discriminator(nn.Module):
+#     def __init__(
+#         self,
+#         in_channels: int,
+#         hidden_channels: int,
+#         max_channels: int,
+#         kernel_size: int,
+#         stride: int,
+#         padding: int,
+#         encoder_n_layers: int,
+#         bias: bool,
+#     ) -> None:
+#         super().__init__()
+#         self.discriminator = nn.ModuleList(
+#             [
+#                 nn.Sequential(
+#                     nn.Conv2d(
+#                         in_channels,
+#                         hidden_channels,
+#                         kernel_size=(1, kernel_size),
+#                         stride=(1, stride),
+#                         padding=(0, padding),
+#                         bias=bias,
+#                     ),
+#                     nn.ReLU(inplace=True),
+#                 )
+#             ]
+#         )
+#         for i in range(encoder_n_layers):
+#             in_channels = hidden_channels
+#             hidden_channels = min(hidden_channels * 2, max_channels)
+#             self.discriminator.append(
+#                 DepthwiseSeparableConv(
+#                     in_channels, hidden_channels, kernel_size, stride, padding, bias
+#                 )
+#             )
+
+#         L = 160000
+#         for _ in range(len(self.discriminator)):
+#             L = 1 + np.floor((L - kernel_size) / stride)
+#         self.head = nn.Sequential(nn.Linear(int(L), 1), nn.Sigmoid())
+
+#     def forward(self, x: torch.FloatTensor):
+#         for layer in self.discriminator:
+#             x = layer(x)
+#         x = self.head(x.squeeze(dim=2))
+#         x = x.squeeze(dim=2).mean(dim=1, keepdim=True)
+#         return x
+
+
+# class GAN(pl.LightningModule):
+#     def __init__(
+#         self,
+#         in_channels: int,
+#         hidden_channels: int,
+#         max_channels: int,
+#         out_channels: int,
+#         kernel_size: int,
+#         stride: int,
+#         padding: int,
+#         encoder_n_layers: int,
+#         nhead: int,
+#         num_layers: int,
+#         dropout: float,
+#         bias: bool,
+#         src_sampling_rate: int,
+#         tgt_sampling_rate: int,
+#         generator_optimizer: Dict[str, Any],
+#         discriminator_optimizer: Dict[str, Any],
+#     ) -> None:
+#         super().__init__()
+#         self.save_hyperparameters()
+#         self.automatic_optimization = False
+
+#         # encoder and decoder
+#         self.generator = MobileNetV1(
+#             in_channels,
+#             hidden_channels,
+#             max_channels,
+#             out_channels,
+#             kernel_size,
+#             stride,
+#             padding,
+#             encoder_n_layers,
+#             nhead,
+#             num_layers,
+#             dropout,
+#             bias,
+#             src_sampling_rate,
+#             tgt_sampling_rate,
+#         )
+#         self.discriminator = Discriminator(
+#             in_channels,
+#             hidden_channels,
+#             max_channels,
+#             kernel_size,
+#             stride,
+#             padding,
+#             encoder_n_layers - 2,
+#             bias,
+#         )
+
+#     def forward(self, waveforms):
+#         x = torchaudio.functional.resample(
+#             waveforms,
+#             self.hparams.src_sampling_rate,
+#             self.hparams.tgt_sampling_rate,
+#         )
+
+#         x = self.generator._forward(x)
+
+#         x = torchaudio.functional.resample(
+#             x,
+#             self.hparams.tgt_sampling_rate,
+#             self.hparams.src_sampling_rate,
+#         )
+#         return x
+
+#     def adversarial_loss(self, y_hat, y):
+#         return F.binary_cross_entropy(y_hat, y)
+
+#     def configure_optimizers(self):
+#         g_optimizer = torch.optim.AdamW(
+#             self.generator.parameters(), **self.hparams.generator_optimizer
+#         )
+#         d_optimizer = torch.optim.AdamW(
+#             self.discriminator.parameters(), **self.hparams.discriminator_optimizer
+#         )
+#         return [g_optimizer, d_optimizer], []
+
+#     def training_step(self, batch):
+#         noisy_waveforms, clean_waveforms, _ = batch
+#         B = clean_waveforms.shape[0]
+
+#         g_optimizer, d_optimizer = self.optimizers()
+
+#         # train generator
+#         # generate images
+#         self.toggle_optimizer(g_optimizer)
+#         enhanced_waveforms = self.generator._forward(noisy_waveforms)
+
+#         l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+
+#         # ground truth result (ie: all fake)
+#         # put on GPU because we created this tensor inside training_loop
+#         valid = torch.ones(B, 1, device=clean_waveforms.device)
+
+#         # adversarial loss is binary cross-entropy
+#         g_loss = self.adversarial_loss(self.discriminator(enhanced_waveforms), valid)
+#         self.manual_backward(g_loss + l1_loss)
+#         g_optimizer.step()
+#         g_optimizer.zero_grad()
+#         self.untoggle_optimizer(g_optimizer)
+
+#         # train discriminator
+#         # Measure discriminator's ability to classify real from generated samples
+#         self.toggle_optimizer(d_optimizer)
+
+#         # how well can it label as real?
+#         valid = torch.ones(B, 1, device=clean_waveforms.device)
+#         d_real = self.discriminator(clean_waveforms)
+#         real_loss = self.adversarial_loss(d_real, valid)
+
+#         # how well can it label as fake?
+#         fake = torch.zeros(B, 1, device=clean_waveforms.device)
+#         d_fake = self.discriminator(enhanced_waveforms.detach())
+#         fake_loss = self.adversarial_loss(d_fake, fake)
+
+#         # discriminator loss is the average of these
+#         d_loss = (real_loss + fake_loss) / 2
+#         self.manual_backward(d_loss)
+#         d_optimizer.step()
+#         d_optimizer.zero_grad()
+#         self.untoggle_optimizer(d_optimizer)
+
+#         self.log_dict(
+#             {
+#                 "l1_loss": l1_loss,
+#                 "g_loss": g_loss,
+#                 "d_loss": d_loss,
+#                 "real_acc": d_real.mean(),
+#                 "fake_acc": d_fake.mean(),
+#             },
+#             on_step=False,
+#             on_epoch=True,
+#             prog_bar=True,
+#             logger=True,
+#             sync_dist=True,
+#         )
 
 
 class CleanUNet(Model):
@@ -648,152 +871,6 @@ class CleanUNet(Model):
         return x
 
 
-class DepthwiseSeparableConv(nn.Module):
-
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias):
-        super().__init__()
-        self.module = nn.Sequential(
-            nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=in_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                groups=in_channels,
-                bias=bias,
-            ),
-            nn.BatchNorm2d(in_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=1,
-                bias=bias,
-            ),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x):
-        return self.module(x)
-
-
-class DepthwiseSeparableConvTranspose(nn.Module):
-
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        kernel_size,
-        stride,
-        padding,
-        output_padding,
-        bias,
-        is_output=False,
-    ):
-        super().__init__()
-        self.module = nn.Sequential(
-            nn.ConvTranspose2d(
-                in_channels=in_channels,
-                out_channels=in_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                output_padding=output_padding,
-                groups=in_channels,
-                bias=bias,
-            ),
-            nn.BatchNorm2d(in_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=1,
-                bias=bias,
-            ),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True) if not is_output else nn.Identity(),
-        )
-
-    def forward(self, x):
-        return self.module(x)
-
-
-class KnowledgeDistillation(Model):
-    def __init__(
-        self,
-        student: Dict[str, Any],
-        teacher: Dict[str, Any],
-        mr_stft_lambda: float,
-        fft_sizes: List[int],
-        hop_lengths: List[int],
-        win_lengths: List[int],
-    ) -> None:
-        super().__init__()
-        self.save_hyperparameters()
-        self.student = MobileNetV1(
-            **student,
-            mr_stft_lambda=mr_stft_lambda,
-            fft_sizes=fft_sizes,
-            hop_lengths=hop_lengths,
-            win_lengths=win_lengths,
-        )
-
-        self.encoder_matcher = nn.Conv1d(
-            student["max_channels"], teacher["max_H"], 1, 1, 3
-        )
-        # self.decoder_matcher = nn.Conv1d(
-        #     student["hidden_channels"], teacher["channels_H"], 1, 1, 63
-        # )
-
-        ckpt_path = teacher.pop("ckpt_path")
-        checkpoint = torch.load(
-            ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu"
-        )
-        self.teacher = OriginalCleanUNet(**teacher)
-        self.teacher.load_state_dict(checkpoint["model_state_dict"])
-        self.teacher.eval()
-        for param in self.teacher.parameters():
-            param.requires_grad = False
-
-    def forward(self, x):
-        return self.student(x)
-
-    def training_step(self, batch, batch_idx):
-        noisies, cleans, _ = batch
-        s_enhanceds, s_downs, s_ups = self.forward(noisies)
-        t_enhanceds, t_downs, t_ups = self.teacher(noisies.squeeze(2))
-
-        # Knowledge distillation loss:
-        kd_loss = 10 * F.mse_loss(
-            self.encoder_matcher(s_downs[-1].squeeze(2)), t_downs[len(s_downs) - 1]
-        )
-        # kd_loss += F.mse_loss(self.decoder_matcher(s_ups[-1].squeeze(2)), t_ups[-1])
-
-        # Speech enhancement loss:
-        l1_loss = F.l1_loss(s_enhanceds, cleans)
-        mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
-            s_enhanceds, cleans
-        )
-        se_loss = l1_loss + mrstft_loss
-
-        # Final loss:
-        loss = kd_loss + se_loss
-
-        self.log_dict(
-            {
-                "train_loss": loss,
-                "train_se_loss": se_loss,
-                "train_kd_loss": kd_loss,
-            },
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-        return loss
-
-
 class VADMobileNetV1(nn.Module):
     def __init__(
         self,
@@ -926,195 +1003,148 @@ class VADMobileNetV1(nn.Module):
         return x, vad
 
 
-class Discriminator(nn.Module):
+class MobileNetV2(nn.Module):
     def __init__(
         self,
-        in_channels: int,
-        hidden_channels: int,
-        max_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
-        encoder_n_layers: int,
-        bias: bool,
+        width_mult: float = 1.0,
+        inverted_residual_setting: Optional[List[List[int]]] = None,
+        round_nearest: int = 8,
+        block: Optional[Callable[..., nn.Module]] = None,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
+        """
+        MobileNet V2 main class
+
+        Args:
+            width_mult (float): Width multiplier - adjusts number of channels in each layer by this amount
+            inverted_residual_setting: Network structure
+            round_nearest (int): Round the number of channels in each layer to be a multiple of this number
+            Set to 1 to turn off rounding
+            block: Module specifying inverted residual building block for mobilenet
+            norm_layer: Module specifying the normalization layer to use
+
+        """
         super().__init__()
-        self.discriminator = nn.ModuleList(
+
+        if block is None:
+            block = InvertedResidual
+
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+
+        input_channel = 32
+
+        if inverted_residual_setting is None:
+            self.inverted_residual_setting = [
+                # t, c, n, s
+                [1, 16, 1, 1],
+                [6, 24, 2, 2],
+                [6, 32, 3, 2],
+                [6, 64, 4, 2],
+                [6, 96, 3, 1],
+                [6, 160, 3, 2],
+                [6, 320, 1, 1],
+            ]
+
+        # only check the first element, assuming user knows t,c,n,s are required
+        if (
+            len(self.inverted_residual_setting) == 0
+            or len(self.inverted_residual_setting[0]) != 4
+        ):
+            raise ValueError(
+                f"inverted_residual_setting should be non-empty or a 4-element list, got {self.inverted_residual_setting}"
+            )
+
+        # building first layer
+        input_channel = _make_divisible(input_channel * width_mult, round_nearest)
+
+        self.encoder = nn.ModuleList(
             [
-                nn.Sequential(
-                    nn.Conv2d(
-                        in_channels,
-                        hidden_channels,
-                        kernel_size=(1, kernel_size),
-                        stride=(1, stride),
-                        padding=(0, padding),
-                        bias=bias,
-                    ),
-                    nn.ReLU(inplace=True),
+                Conv2dNormActivation(
+                    1,
+                    input_channel,
+                    stride=2,
+                    norm_layer=norm_layer,
+                    activation_layer=nn.ReLU6,
                 )
             ]
         )
-        for i in range(encoder_n_layers):
-            in_channels = hidden_channels
-            hidden_channels = min(hidden_channels * 2, max_channels)
-            self.discriminator.append(
-                DepthwiseSeparableConv(
-                    in_channels, hidden_channels, kernel_size, stride, padding, bias
+
+        self.decoder = nn.ModuleList(
+            [
+                nn.ConvTranspose2d(
+                    input_channel,
+                    1,
+                    kernel_size=1,
+                    stride=2,
+                    padding=0,
+                    output_padding=0,
                 )
-            )
-
-        L = 160000
-        for _ in range(len(self.discriminator)):
-            L = 1 + np.floor((L - kernel_size) / stride)
-        self.head = nn.Sequential(nn.Linear(int(L), 1), nn.Sigmoid())
-
-    def forward(self, x: torch.FloatTensor):
-        for layer in self.discriminator:
-            x = layer(x)
-        x = self.head(x.squeeze(dim=2))
-        x = x.squeeze(dim=2).mean(dim=1, keepdim=True)
-        return x
-
-
-class GAN(pl.LightningModule):
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        max_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int,
-        encoder_n_layers: int,
-        nhead: int,
-        num_layers: int,
-        dropout: float,
-        bias: bool,
-        src_sampling_rate: int,
-        tgt_sampling_rate: int,
-        generator_optimizer: Dict[str, Any],
-        discriminator_optimizer: Dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.save_hyperparameters()
-        self.automatic_optimization = False
-
-        # encoder and decoder
-        self.generator = MobileNetV1(
-            in_channels,
-            hidden_channels,
-            max_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            padding,
-            encoder_n_layers,
-            nhead,
-            num_layers,
-            dropout,
-            bias,
-            src_sampling_rate,
-            tgt_sampling_rate,
-        )
-        self.discriminator = Discriminator(
-            in_channels,
-            hidden_channels,
-            max_channels,
-            kernel_size,
-            stride,
-            padding,
-            encoder_n_layers - 2,
-            bias,
+            ]
         )
 
-    def forward(self, waveforms):
-        x = torchaudio.functional.resample(
-            waveforms,
-            self.hparams.src_sampling_rate,
-            self.hparams.tgt_sampling_rate,
-        )
+        # building inverted residual blocks
+        for t, c, n, s in self.inverted_residual_setting:
+            output_channel = _make_divisible(c * width_mult, round_nearest)
+            for i in range(n):
+                stride = s if i == 0 else 1
+                self.encoder.append(
+                    InvertedResidual(
+                        input_channel,
+                        output_channel,
+                        stride,
+                        expand_ratio=t,
+                        dw_layer=Conv2dNormActivation,
+                        norm_layer=norm_layer,
+                    )
+                )
+                self.decoder.insert(
+                    0,
+                    InvertedResidual(
+                        output_channel,
+                        input_channel,
+                        stride,
+                        expand_ratio=t,
+                        dw_layer=ConvTranspose2dNormActivation,
+                        norm_layer=norm_layer,
+                    ),
+                )
+                input_channel = output_channel
 
-        x = self.generator._forward(x)
+        # weight initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.zeros_(m.bias)
 
-        x = torchaudio.functional.resample(
+    def forward(self, x: Tensor) -> Tensor:
+        H, W = x.shape[-2:]
+        x = padding(
             x,
-            self.hparams.tgt_sampling_rate,
-            self.hparams.src_sampling_rate,
+            len(self.inverted_residual_setting) + 1,
+            self.kernel_size,
+            self.stride,
+            self.pad_value,
         )
+        downs = []
+        for downsampling_block in self.encoder:
+            x = downsampling_block(x)
+            downs.append(x)
+        downs = downs[::-1]
+
+        for i, upsampling_block in enumerate(self.decoder):
+            skip_i = downs[i]
+            x = x + skip_i[:, :, :, -x.shape[-1] :]
+            x = upsampling_block(x)
+        x = x[:, :, -H:, -W:]
         return x
-
-    def adversarial_loss(self, y_hat, y):
-        return F.binary_cross_entropy(y_hat, y)
-
-    def configure_optimizers(self):
-        g_optimizer = torch.optim.AdamW(
-            self.generator.parameters(), **self.hparams.generator_optimizer
-        )
-        d_optimizer = torch.optim.AdamW(
-            self.discriminator.parameters(), **self.hparams.discriminator_optimizer
-        )
-        return [g_optimizer, d_optimizer], []
-
-    def training_step(self, batch):
-        noisy_waveforms, clean_waveforms, _ = batch
-        B = clean_waveforms.shape[0]
-
-        g_optimizer, d_optimizer = self.optimizers()
-
-        # train generator
-        # generate images
-        self.toggle_optimizer(g_optimizer)
-        enhanced_waveforms = self.generator._forward(noisy_waveforms)
-
-        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
-
-        # ground truth result (ie: all fake)
-        # put on GPU because we created this tensor inside training_loop
-        valid = torch.ones(B, 1, device=clean_waveforms.device)
-
-        # adversarial loss is binary cross-entropy
-        g_loss = self.adversarial_loss(self.discriminator(enhanced_waveforms), valid)
-        self.manual_backward(g_loss + l1_loss)
-        g_optimizer.step()
-        g_optimizer.zero_grad()
-        self.untoggle_optimizer(g_optimizer)
-
-        # train discriminator
-        # Measure discriminator's ability to classify real from generated samples
-        self.toggle_optimizer(d_optimizer)
-
-        # how well can it label as real?
-        valid = torch.ones(B, 1, device=clean_waveforms.device)
-        d_real = self.discriminator(clean_waveforms)
-        real_loss = self.adversarial_loss(d_real, valid)
-
-        # how well can it label as fake?
-        fake = torch.zeros(B, 1, device=clean_waveforms.device)
-        d_fake = self.discriminator(enhanced_waveforms.detach())
-        fake_loss = self.adversarial_loss(d_fake, fake)
-
-        # discriminator loss is the average of these
-        d_loss = (real_loss + fake_loss) / 2
-        self.manual_backward(d_loss)
-        d_optimizer.step()
-        d_optimizer.zero_grad()
-        self.untoggle_optimizer(d_optimizer)
-
-        self.log_dict(
-            {
-                "l1_loss": l1_loss,
-                "g_loss": g_loss,
-                "d_loss": d_loss,
-                "real_acc": d_real.mean(),
-                "fake_acc": d_fake.mean(),
-            },
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
 
 
 class VADLightningMobileNetV1(Model):
