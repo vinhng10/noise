@@ -411,8 +411,6 @@ class InvertedResidual(nn.Module):
 
 # CleanUNet architecture
 def padding(x, D, K, S, value=0):
-    """padding zeroes to x so that denoised audio has the same height and width"""
-
     H, W = x.shape[-2:]
 
     if isinstance(K, int):
@@ -427,24 +425,20 @@ def padding(x, D, K, S, value=0):
 
     # Calculate required height
     H_out = H
+    W_out = W
     for _ in range(D):
         if H_out < K_h:
             H_out = 1
         else:
             H_out = 1 + np.ceil((H_out - K_h) / S_h)
 
-    for _ in range(D):
-        H_out = (H_out - 1) * S_h + K_h
-
-    # Calculate required width
-    W_out = W
-    for _ in range(D):
         if W_out < K_w:
             W_out = 1
         else:
             W_out = 1 + np.ceil((W_out - K_w) / S_w)
 
     for _ in range(D):
+        H_out = (H_out - 1) * S_h + K_h
         W_out = (W_out - 1) * S_w + K_w
 
     H_out, W_out = int(H_out), int(W_out)
@@ -1007,17 +1001,18 @@ class MobileNetV2(nn.Module):
     def __init__(
         self,
         width_mult: float = 1.0,
-        inverted_residual_setting: Optional[List[List[int]]] = None,
+        layer_cofig: Optional[List[List[int]]] = None,
         round_nearest: int = 8,
         block: Optional[Callable[..., nn.Module]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
+        pad_value: float = 0,
     ) -> None:
         """
         MobileNet V2 main class
 
         Args:
             width_mult (float): Width multiplier - adjusts number of channels in each layer by this amount
-            inverted_residual_setting: Network structure
+            layer_cofig: Network structure
             round_nearest (int): Round the number of channels in each layer to be a multiple of this number
             Set to 1 to turn off rounding
             block: Module specifying inverted residual building block for mobilenet
@@ -1025,6 +1020,7 @@ class MobileNetV2(nn.Module):
 
         """
         super().__init__()
+        self.pad_value = pad_value
 
         if block is None:
             block = InvertedResidual
@@ -1034,8 +1030,8 @@ class MobileNetV2(nn.Module):
 
         input_channel = 32
 
-        if inverted_residual_setting is None:
-            self.inverted_residual_setting = [
+        if layer_cofig is None:
+            self.layer_cofig = [
                 # t, c, n, s
                 [1, 16, 1, 1],
                 [6, 24, 2, 2],
@@ -1045,14 +1041,13 @@ class MobileNetV2(nn.Module):
                 [6, 160, 3, 2],
                 [6, 320, 1, 1],
             ]
+        else:
+            self.layer_cofig = layer_cofig
 
         # only check the first element, assuming user knows t,c,n,s are required
-        if (
-            len(self.inverted_residual_setting) == 0
-            or len(self.inverted_residual_setting[0]) != 4
-        ):
+        if len(self.layer_cofig) == 0 or len(self.layer_cofig[0]) != 4:
             raise ValueError(
-                f"inverted_residual_setting should be non-empty or a 4-element list, got {self.inverted_residual_setting}"
+                f"layer_cofig should be non-empty or a 4-element list, got {self.layer_cofig}"
             )
 
         # building first layer
@@ -1084,7 +1079,7 @@ class MobileNetV2(nn.Module):
         )
 
         # building inverted residual blocks
-        for t, c, n, s in self.inverted_residual_setting:
+        for t, c, n, s in self.layer_cofig:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
                 stride = s if i == 0 else 1
@@ -1124,15 +1119,18 @@ class MobileNetV2(nn.Module):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.zeros_(m.bias)
 
+        self.H_padding = 0
+        self.W_padding = 0
+        self.searching = False
+        self.found = False
+
     def forward(self, x: Tensor) -> Tensor:
+        # Search padding if not already done
+        if not self.searching and not self.found:
+            self._search_padding(x)
+            
         H, W = x.shape[-2:]
-        x = padding(
-            x,
-            len(self.inverted_residual_setting) + 1,
-            self.kernel_size,
-            self.stride,
-            self.pad_value,
-        )
+        x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
         downs = []
         for downsampling_block in self.encoder:
             x = downsampling_block(x)
@@ -1141,10 +1139,23 @@ class MobileNetV2(nn.Module):
 
         for i, upsampling_block in enumerate(self.decoder):
             skip_i = downs[i]
-            x = x + skip_i[:, :, :, -x.shape[-1] :]
+            x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
             x = upsampling_block(x)
         x = x[:, :, -H:, -W:]
         return x
+
+    @torch.no_grad()
+    def _search_padding(self, x):
+        self.searching = True
+        H, W = x.shape[-2:]
+        out = self.forward(x)
+        while out.shape[-2] < H:
+            self.H_padding += 1
+            out = self.forward(x)
+        while out.shape[-1] < W:
+            self.W_padding += 1
+            out = self.forward(x)
+        self.found = True
 
 
 class VADLightningMobileNetV1(Model):
@@ -1450,6 +1461,82 @@ class LightningSpectral(Model):
             {
                 f"{stage}_loss": loss,
                 f"{stage}_vad_loss": vad_loss,
+                f"{stage}_waveform_loss": waveform_loss,
+                f"{stage}_spectral_loss": spectral_loss,
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+        return loss
+
+
+class LightningMobileNetV2(Model):
+    def __init__(
+        self,
+        n_fft: int,
+        hop_length: Optional[int],
+        win_length: Optional[int],
+        window: str,
+        layer_cofig: List[List[int]],
+        pad_value: float,
+        max_frames: int,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+        hop_length = hop_length if hop_length is not None else n_fft // 4
+        win_length = win_length if win_length is not None else n_fft
+        self.stft = STFT(
+            max_frames=max_frames,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            window=window,
+        )
+        self.model = MobileNetV2(layer_cofig=layer_cofig, pad_value=pad_value)
+
+    def forward(self, waveforms):
+        # Compute the STFT to get magnitude and phase
+        log_magnitudes, phases = self.stft.forward(waveforms)
+
+        # Apply filters
+        log_magnitudes = self._forward(log_magnitudes)
+
+        # Reconstruct the waveform from the magnitude and phase
+        waveforms = self.stft.inverse(log_magnitudes, phases)
+
+        return waveforms
+
+    def _forward(self, log_magnitudes):
+        log_magnitudes = (log_magnitudes + 2) * 0.5
+        filters = self.model.forward(log_magnitudes)
+        log_magnitudes = (log_magnitudes * filters).clamp(min=-2.46, max=4)
+        log_magnitudes = log_magnitudes * 2 - 2
+        return log_magnitudes
+
+    def _shared_step(self, batch, batch_idx, stage):
+        noisy_waveforms, clean_waveforms, _ = batch
+        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
+        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
+        noisy_log_magnitudes, phases = self.stft.forward(noisy_waveforms)
+        clean_log_magnitudes, _ = self.stft.forward(clean_waveforms)
+        enhanced_log_magnitudes = self._forward(noisy_log_magnitudes)
+
+        # Log-magnitude loss
+        spectral_loss = F.l1_loss(enhanced_log_magnitudes, clean_log_magnitudes)
+
+        # Waveform loss
+        enhanced_waveforms = self.stft.inverse(enhanced_log_magnitudes, phases)
+        waveform_loss = F.smooth_l1_loss(
+            enhanced_waveforms, clean_waveforms[:, 0, 0, :], beta=0.5
+        )
+
+        loss = waveform_loss + spectral_loss
+        self.log_dict(
+            {
+                f"{stage}_loss": loss,
                 f"{stage}_waveform_loss": waveform_loss,
                 f"{stage}_spectral_loss": spectral_loss,
             },
