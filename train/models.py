@@ -956,20 +956,23 @@ class VADMobileNetV1(nn.Module):
         )
         self.vad = nn.Linear(hidden_channels, 1)
 
+        self.H_padding = 0
+        self.W_padding = 0
+        self.searching = False
+        self.found = False
+
     def forward(self, waveforms):
         x, vad = self._forward(waveforms)
         x *= (1e4 * vad[..., None, None]).sigmoid()
         return x
 
     def _forward(self, x):
+        # Search padding if not already done
+        if not self.searching and not self.found:
+            self._search_padding(x)
+
         H, W = x.shape[-2:]
-        x = padding(
-            x,
-            self.encoder_n_layers + 1,
-            self.kernel_size,
-            self.stride,
-            self.pad_value,
-        )
+        x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
 
         # encoder
         downs = []
@@ -990,11 +993,24 @@ class VADMobileNetV1(nn.Module):
         for i, upsampling_block in enumerate(self.decoder):
             ups.append(x)
             skip_i = downs[i]
-            x = x + skip_i[:, :, :, -x.shape[-1] :]
+            x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
             x = upsampling_block(x)
 
         x = x[:, :, -H:, -W:]
         return x, vad
+
+    @torch.no_grad()
+    def _search_padding(self, x):
+        self.searching = True
+        H, W = x.shape[-2:]
+        out = self.forward(x)
+        while out.shape[-2] < H:
+            self.H_padding += 1
+            out = self.forward(x)
+        while out.shape[-1] < W:
+            self.W_padding += 1
+            out = self.forward(x)
+        self.found = True
 
 
 class MobileNetV2(nn.Module):
@@ -1128,7 +1144,7 @@ class MobileNetV2(nn.Module):
         # Search padding if not already done
         if not self.searching and not self.found:
             self._search_padding(x)
-            
+
         H, W = x.shape[-2:]
         x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
         downs = []
@@ -1430,7 +1446,8 @@ class LightningSpectral(Model):
     def _forward(self, log_magnitudes):
         log_magnitudes = (log_magnitudes + 2) * 0.5
         filters, vad = self.model._forward(log_magnitudes)
-        log_magnitudes = (log_magnitudes * filters) * 2 - 2
+        log_magnitudes = (log_magnitudes * filters).clamp(min=-2.46, max=4)
+        log_magnitudes = log_magnitudes * 2 - 2
         return log_magnitudes, vad
 
     def _shared_step(self, batch, batch_idx, stage):
