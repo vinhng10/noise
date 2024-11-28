@@ -12,7 +12,7 @@ fit:
       init_args:
         save_dir: ./logs
         name: null
-        version: mobilenetv2-2.0.0
+        version: spectralv2-1.0.0
         log_graph: false
         default_hp_metric: false
         prefix: ""
@@ -79,22 +79,23 @@ fit:
         [1, 16, 1, 1],
         [6, 24, 2, 2],
         [6, 32, 2, 2],
-        [6, 64, 2, 2],
+        [6, 64, 2, 1],
         [6, 96, 2, 2],
-        [6, 128, 1, 2],
+        [6, 128, 1, 1],
       ]
-    pad_value: 0.0
-    mr_stft_lambda: 0.5
-    fft_sizes: [512, 1024, 2048]
-    hop_lengths: [50, 120, 240]
-    win_lengths: [240, 600, 1200]
+    pad_value: -2.4538776394910684 # (math.log(1e-3) + 2) * 0.5
+    max_frames: 8000
+    n_fft: 320
+    hop_length: 160
+    win_length: 320
+    window: hann
   data:
     data_dir: ./data
     sampling_rate: 16000
     length: 0
     num_samples: 10000
     num_workers: 4
-    batch_size: 4
+    batch_size: 16
     p: 0.3
   optimizer:
     lr: 5e-4

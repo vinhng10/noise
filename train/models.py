@@ -409,70 +409,242 @@ class InvertedResidual(nn.Module):
             return self.conv(x)
 
 
-# CleanUNet architecture
-def padding(x, D, K, S, value=0):
-    H, W = x.shape[-2:]
+class STFT(torch.nn.Module):
+    """adapted from Prem Seetharaman's https://github.com/pseeth/pytorch-stft"""
 
-    if isinstance(K, int):
-        K_h, K_w = K, K
-    else:
-        K_h, K_w = K
+    def __init__(self, max_frames, n_fft, hop_length, win_length, window):
+        super().__init__()
+        self.max_frames = max_frames
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.window = window
+        self.scale = n_fft / hop_length
+        self.pad_amount = n_fft // 2
+        self.cutoff = (self.n_fft // 2) + 1
 
-    if isinstance(S, int):
-        S_h, S_w = S, S
-    else:
-        S_h, S_w = S
+        fourier_basis = np.fft.fft(np.eye(self.n_fft))
+        fourier_basis = np.vstack(
+            [
+                np.real(fourier_basis[: self.cutoff, :]),
+                np.imag(fourier_basis[: self.cutoff, :]),
+            ]
+        )
+        forward_basis = torch.FloatTensor(fourier_basis[:, None, :]).detach()
+        inverse_basis = torch.FloatTensor(
+            np.linalg.pinv(self.scale * fourier_basis).T[:, None, :]
+        ).detach()
+        if window is not None:
+            assert n_fft >= win_length
+            # get window and zero center pad it to n_fft
+            fft_window = get_window(window, win_length, fftbins=True)
+            fft_window = pad_center(fft_window, size=n_fft)
+            fft_window = torch.from_numpy(fft_window).float()
+            # window the bases
+            forward_basis *= fft_window
+            inverse_basis *= fft_window
+        window_sum = self.window_sumsquare(
+            self.window,
+            self.max_frames,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            n_fft=self.n_fft,
+            dtype=np.float32,
+        )
+        window_sum[window_sum == 0] = 1
+        window_sum = self.scale / window_sum
+        window_sum = torch.FloatTensor(window_sum).detach()
 
-    # Calculate required height
-    H_out = H
-    W_out = W
-    for _ in range(D):
-        if H_out < K_h:
-            H_out = 1
-        else:
-            H_out = 1 + np.ceil((H_out - K_h) / S_h)
+        self.register_buffer("forward_basis", forward_basis)
+        self.register_buffer("inverse_basis", inverse_basis)
+        self.register_buffer("window_sum", window_sum)
 
-        if W_out < K_w:
-            W_out = 1
-        else:
-            W_out = 1 + np.ceil((W_out - K_w) / S_w)
+    def forward(self, waveform):
+        waveform = F.pad(
+            waveform.squeeze(1), (self.pad_amount, self.pad_amount), mode="reflect"
+        )
 
-    for _ in range(D):
-        H_out = (H_out - 1) * S_h + K_h
-        W_out = (W_out - 1) * S_w + K_w
+        forward_transform = F.conv1d(
+            waveform, self.forward_basis, stride=self.hop_length, padding=0
+        )
 
-    H_out, W_out = int(H_out), int(W_out)
-    x = F.pad(x, (W_out - W, 0, H_out - H, 0), value=value)
-    return x
+        real = forward_transform[:, : self.cutoff, :]
+        imag = forward_transform[:, self.cutoff :, :]
+
+        log_magnitude = torch.sqrt(real**2 + imag**2).unsqueeze(1).clamp(min=1e-3).log()
+        phase = torch.atan2(imag, real)
+
+        return log_magnitude, phase
+
+    def inverse(self, log_magnitude, phase):
+        magnitude = log_magnitude.exp().squeeze(1)
+        recombine_magnitude_phase = torch.cat(
+            [magnitude * torch.cos(phase), magnitude * torch.sin(phase)], dim=1
+        )
+        inverse_transform = F.conv_transpose1d(
+            recombine_magnitude_phase,
+            self.inverse_basis,
+            stride=self.hop_length,
+            padding=0,
+        )
+        if self.window is not None:
+            inverse_transform *= self.window_sum[: inverse_transform.size(-1)]
+
+        inverse_transform = inverse_transform[
+            :, None, :, self.pad_amount : -self.pad_amount
+        ]
+        inverse_transform = inverse_transform.clamp(min=-1.0, max=1.0)
+        return inverse_transform
+
+    @staticmethod
+    def window_sumsquare(
+        window,
+        n_frames,
+        hop_length=200,
+        win_length=800,
+        n_fft=800,
+        dtype=np.float32,
+        norm=None,
+    ):
+        """
+        # from librosa 0.6
+        Compute the sum-square envelope of a window function at a given hop length.
+        This is used to estimate modulation effects induced by windowing
+        observations in short-time fourier transforms.
+        Parameters
+        ----------
+        window : string, tuple, number, callable, or list-like
+            Window specification, as in `get_window`
+        n_frames : int > 0
+            The number of analysis frames
+        hop_length : int > 0
+            The number of samples to advance between frames
+        win_length : [optional]
+            The length of the window function.  By default, this matches `n_fft`.
+        n_fft : int > 0
+            The length of each analysis frame.
+        dtype : np.dtype
+            The data type of the output
+        Returns
+        -------
+        wss : np.ndarray, shape=`(n_fft + hop_length * (n_frames - 1))`
+            The sum-squared envelope of the window function
+        """
+        if win_length is None:
+            win_length = n_fft
+
+        n = n_fft + hop_length * (n_frames - 1)
+        x = np.zeros(n, dtype=dtype)
+
+        # Compute the squared window at the desired length
+        win_sq = get_window(window, win_length, fftbins=True)
+        win_sq = librosa_util.normalize(win_sq, norm=norm) ** 2
+        win_sq = librosa_util.pad_center(win_sq, size=n_fft)
+
+        # Fill the envelope
+        for i in range(n_frames):
+            sample = i * hop_length
+            x[sample : min(n, sample + n_fft)] += win_sq[
+                : max(0, min(n_fft, n - sample))
+            ]
+        return x
 
 
-def weight_scaling_init(layer):
-    """
-    weight rescaling initialization from https://arxiv.org/abs/1911.13254
-    """
-    w = layer.weight.detach()
-    alpha = 10.0 * w.std()
-    layer.weight.data /= torch.sqrt(alpha)
-    layer.bias.data /= torch.sqrt(alpha)
-
-
-# Model Definition:
-class Model(pl.LightningModule):
+# Base Definition:
+class Base(pl.LightningModule):
     SUPPORTED_SAMPLING_RATE = 16000
 
-    def forward(self, x):
-        return self.model(x)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__()
+
+        # weight initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+            elif isinstance(m, nn.ConvTranspose2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_in")
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.zeros_(m.bias)
+
+        self.H_padding = 0
+        self.W_padding = 0
+        self.searching = False
+        self.found = False
+
+    def forward(self, waveforms):
+        x, vad = self._forward(waveforms)
+        x *= (1e4 * vad[..., None, None]).sigmoid()
+        return x
+
+    def _forward(self, x):
+        # Search padding if not already done
+        if not self.searching and not self.found:
+            self._search_padding(x)
+
+        H, W = x.shape[-2:]
+        x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
+
+        # encoder
+        downs = []
+        for downsampling_block in self.encoder:
+            x = downsampling_block(x)
+            downs.append(x)
+        downs = downs[::-1]
+
+        # attention & vad
+        b, c, h, w = x.shape
+        x = x.view(b, c, -1).permute(0, 2, 1)
+        x = self.bottleneck_attention(x, None)
+        vad = self.vad(x[:, 0, :])
+        x = x.permute(0, 2, 1).view(b, c, h, w)
+
+        # decoder
+        for i, upsampling_block in enumerate(self.decoder):
+            skip_i = downs[i]
+            x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
+            x = upsampling_block(x)
+        x = x[:, :, -H:, -W:]
+
+        return x, vad
+
+    @torch.no_grad()
+    def _search_padding(self, x):
+        self.searching = True
+        H, W = x.shape[-2:]
+        out = self.forward(x)
+        while out.shape[-2] < H:
+            self.H_padding += 1
+            out = self.forward(x)
+        while out.shape[-1] < W:
+            self.W_padding += 1
+            out = self.forward(x)
+        self.found = True
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
-        enhanced_waveforms = self.model._forward(noisy_waveforms)
-        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
+        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
+        enhanced_waveforms, vad = self._forward(noisy_waveforms)
+        vad_loss = F.binary_cross_entropy_with_logits(
+            vad.squeeze(),
+            ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
+        )
+        l1_loss = F.smooth_l1_loss(enhanced_waveforms, clean_waveforms, beta=0.5)
         mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
             enhanced_waveforms, clean_waveforms
         )
-        loss = l1_loss + mrstft_loss
+        loss = l1_loss + mrstft_loss + vad_loss
         self.log_dict(
-            {f"{stage}_loss": loss},
+            {
+                f"{stage}_loss": loss,
+                f"{stage}_l1_loss": l1_loss,
+                f"{stage}_mrstft_loss": mrstft_loss,
+                f"{stage}_vad_loss": vad_loss,
+            },
             on_step=False,
             on_epoch=True,
             prog_bar=True,
@@ -520,6 +692,88 @@ class Model(pl.LightningModule):
             log_mag_loss = F.l1_loss(torch.log(y_mag), torch.log(x_mag))
 
             loss += log_mag_loss
+        return loss
+
+
+class BaseSpectral(Base):
+    def __init__(
+        self,
+        max_frames: int,
+        n_fft: int,
+        hop_length: Optional[int],
+        win_length: Optional[int],
+        window: str,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        hop_length = hop_length if hop_length is not None else n_fft // 4
+        win_length = win_length if win_length is not None else n_fft
+        self.stft = STFT(
+            max_frames=max_frames,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            window=window,
+        )
+
+    def forward(self, waveforms):
+        # Compute the STFT to get magnitude and phase
+        log_magnitudes, phases = self.stft.forward(waveforms)
+
+        # Apply filters
+        log_magnitudes, vad = self._forward(log_magnitudes)
+
+        # Reconstruct the waveform from the magnitude and phase
+        waveforms = self.stft.inverse(log_magnitudes, phases)
+        waveforms *= (1e4 * vad[..., None, None]).sigmoid()
+
+        return waveforms
+
+    def _forward(self, log_magnitudes):
+        log_magnitudes = (log_magnitudes + 2) * 0.5
+        filters, vad = self.model._forward(log_magnitudes)
+        log_magnitudes = (log_magnitudes * filters).clamp(min=-2.46, max=4)
+        log_magnitudes = log_magnitudes * 2 - 2
+        return log_magnitudes, vad
+
+    def _shared_step(self, batch, batch_idx, stage):
+        noisy_waveforms, clean_waveforms, _ = batch
+        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
+        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
+        noisy_log_magnitudes, phases = self.stft.forward(noisy_waveforms)
+        clean_log_magnitudes, _ = self.stft.forward(clean_waveforms)
+        enhanced_log_magnitudes, vad = self._forward(noisy_log_magnitudes)
+
+        # Spectral loss
+        spectral_loss = F.l1_loss(enhanced_log_magnitudes, clean_log_magnitudes)
+
+        # Voice activity detection loss
+        vad_loss = F.binary_cross_entropy_with_logits(
+            vad.squeeze(),
+            ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
+        )
+
+        # Waveform loss
+        enhanced_waveforms = self.stft.inverse(enhanced_log_magnitudes, phases)
+        waveform_loss = F.smooth_l1_loss(
+            enhanced_waveforms, clean_waveforms[:, 0, 0, :], beta=0.5
+        )
+
+        loss = waveform_loss + spectral_loss + vad_loss
+        self.log_dict(
+            {
+                f"{stage}_loss": loss,
+                f"{stage}_vad_loss": vad_loss,
+                f"{stage}_waveform_loss": waveform_loss,
+                f"{stage}_spectral_loss": spectral_loss,
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
         return loss
 
 
@@ -714,158 +968,171 @@ class Model(pl.LightningModule):
 #         )
 
 
-class CleanUNet(Model):
-
+class MobileNetV2(nn.Module):
     def __init__(
         self,
-        in_channels: int,
-        hidden_channels: int,
-        out_channels: int,
-        encoder_n_layers: int,
-        nhead: int,
-        dim_feedforward: int,
-        num_layers: int,
-        dropout: float,
-        bias: bool,
-        mr_stft_lambda: float,
-        fft_sizes: List[int],
-        hop_lengths: List[int],
-        win_lengths: List[int],
+        width_mult: float = 1.0,
+        layer_config: Optional[List[List[int]]] = None,
+        round_nearest: int = 8,
+        block: Optional[Callable[..., nn.Module]] = None,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        pad_value: float = 0,
     ) -> None:
+        """
+        MobileNet V2 main class
+
+        Args:
+            width_mult (float): Width multiplier - adjusts number of channels in each layer by this amount
+            layer_config: Network structure
+            round_nearest (int): Round the number of channels in each layer to be a multiple of this number
+            Set to 1 to turn off rounding
+            block: Module specifying inverted residual building block for mobilenet
+            norm_layer: Module specifying the normalization layer to use
+
+        """
         super().__init__()
-        self.save_hyperparameters()
+        self.pad_value = pad_value
 
-        # encoder and decoder
-        self.encoder = nn.ModuleList()
-        self.decoder = nn.ModuleList()
+        if block is None:
+            block = InvertedResidual
 
-        for i in range(encoder_n_layers):
-            self.encoder.append(
-                nn.Sequential(
-                    nn.Conv2d(
-                        in_channels,
-                        hidden_channels,
-                        kernel_size=(1, 3),
-                        stride=(1, 2),
-                        padding=(0, 1),
-                        bias=bias,
-                    ),
-                    nn.ReLU(),
-                    nn.Conv2d(
-                        hidden_channels,
-                        hidden_channels * 2,
-                        kernel_size=(1, 1),
-                        stride=(1, 1),
-                        padding=(0, 0),
-                        bias=bias,
-                    ),
-                    nn.GLU(dim=1),
-                )
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+
+        input_channel = 32
+
+        if layer_config is None:
+            self.layer_config = [
+                # t, c, n, s
+                [1, 16, 1, 1],
+                [6, 24, 2, 2],
+                [6, 32, 3, 2],
+                [6, 64, 4, 2],
+                [6, 96, 3, 1],
+                [6, 160, 3, 2],
+                [6, 320, 1, 1],
+            ]
+        else:
+            self.layer_config = layer_config
+
+        # only check the first element, assuming user knows t,c,n,s are required
+        if len(self.layer_config) == 0 or len(self.layer_config[0]) != 4:
+            raise ValueError(
+                f"layer_config should be non-empty or a 4-element list, got {self.layer_config}"
             )
-            in_channels = hidden_channels
 
-            if i == 0:
-                self.decoder.append(
-                    nn.Sequential(
-                        nn.Conv2d(
-                            hidden_channels,
-                            hidden_channels * 2,
-                            kernel_size=(1, 1),
-                            stride=(1, 1),
-                            padding=(0, 0),
-                            bias=bias,
-                        ),
-                        nn.GLU(dim=1),
-                        nn.ConvTranspose2d(
-                            hidden_channels,
-                            out_channels,
-                            kernel_size=(1, 3),
-                            stride=(1, 2),
-                            padding=(0, 1),
-                            output_padding=(0, 1),
-                            bias=bias,
-                        ),
-                    ),
+        # building first layer
+        input_channel = _make_divisible(input_channel * width_mult, round_nearest)
+
+        self.encoder = nn.ModuleList(
+            [
+                Conv2dNormActivation(
+                    1,
+                    input_channel,
+                    stride=2,
+                    norm_layer=norm_layer,
+                    activation_layer=nn.ReLU6,
                 )
-            else:
+            ]
+        )
+
+        self.decoder = nn.ModuleList(
+            [
+                nn.ConvTranspose2d(
+                    input_channel,
+                    1,
+                    kernel_size=1,
+                    stride=2,
+                    padding=0,
+                    output_padding=0,
+                )
+            ]
+        )
+
+        # building inverted residual blocks
+        for t, c, n, s in self.layer_config:
+            output_channel = _make_divisible(c * width_mult, round_nearest)
+            for i in range(n):
+                stride = s if i == 0 else 1
+                self.encoder.append(
+                    InvertedResidual(
+                        input_channel,
+                        output_channel,
+                        stride,
+                        expand_ratio=t,
+                        dw_layer=Conv2dNormActivation,
+                        norm_layer=norm_layer,
+                    )
+                )
                 self.decoder.insert(
                     0,
-                    nn.Sequential(
-                        nn.Conv2d(
-                            hidden_channels,
-                            hidden_channels * 2,
-                            kernel_size=(1, 1),
-                            stride=(1, 1),
-                            padding=(0, 0),
-                            bias=bias,
-                        ),
-                        nn.GLU(dim=1),
-                        nn.ConvTranspose2d(
-                            hidden_channels,
-                            out_channels,
-                            kernel_size=(1, 3),
-                            stride=(1, 2),
-                            padding=(0, 1),
-                            output_padding=(0, 1),
-                            bias=bias,
-                        ),
-                        nn.ReLU(),
+                    InvertedResidual(
+                        output_channel,
+                        input_channel,
+                        stride,
+                        expand_ratio=t,
+                        dw_layer=ConvTranspose2dNormActivation,
+                        norm_layer=norm_layer,
                     ),
                 )
-            out_channels = hidden_channels
+                input_channel = output_channel
 
-            # hidden_channels *= 2
+        # weight initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+            elif isinstance(m, nn.ConvTranspose2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_in")
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.zeros_(m.bias)
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_channels,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            bias=bias,
-        )
-        self.bottleneck_attention = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers
-        )
+        self.H_padding = 0
+        self.W_padding = 0
+        self.searching = False
+        self.found = False
 
-        # self.apply(self._init_weights)
+    def forward(self, x: Tensor) -> Tensor:
+        # Search padding if not already done
+        if not self.searching and not self.found:
+            self._search_padding(x)
 
-    def _init_weights(self, module):
-        """
-        weight rescaling initialization from https://arxiv.org/abs/1911.13254
-        """
-        if isinstance(module, (nn.Conv1d, nn.ConvTranspose1d)):
-            w = module.weight.detach()
-            alpha = 10.0 * w.std()
-            module.weight.data /= torch.sqrt(alpha)
-            module.bias.data /= torch.sqrt(alpha)
-
-    def forward(self, waveforms):
-        # normalization and padding
-        std = waveforms.std(dim=-1, keepdim=True) + 1e-3
-        x = waveforms / std
+        H, W = x.shape[-2:]
+        x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
 
         # encoder
-        skip_connections = []
+        downs = []
         for downsampling_block in self.encoder:
             x = downsampling_block(x)
-            skip_connections.append(x)
-        skip_connections = skip_connections[::-1]
+            downs.append(x)
+        downs = downs[::-1]
 
-        x = x.squeeze(2).permute(2, 0, 1)
-        x = self.bottleneck_attention(x)
-        x = x.permute(1, 2, 0).unsqueeze(2)
-
-        # decoder
         for i, upsampling_block in enumerate(self.decoder):
-            skip_i = skip_connections[i]
-            x = x + skip_i[:, :, : x.shape[-1]]
+            skip_i = downs[i]
+            x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
             x = upsampling_block(x)
-
-        x = x * std
+        x = x[:, :, -H:, -W:]
         return x
 
+    @torch.no_grad()
+    def _search_padding(self, x):
+        self.searching = True
+        H, W = x.shape[-2:]
+        out = self.forward(x)
+        while out.shape[-2] < H:
+            self.H_padding += 1
+            out = self.forward(x)
+        while out.shape[-1] < W:
+            self.W_padding += 1
+            out = self.forward(x)
+        self.found = True
 
-class VADMobileNetV1(nn.Module):
+
+class VADMobileNetV1(Base):
+
     def __init__(
         self,
         in_channels: int,
@@ -881,8 +1148,13 @@ class VADMobileNetV1(nn.Module):
         dropout: float,
         bias: bool,
         pad_value: float,
+        mr_stft_lambda: float,
+        fft_sizes: List[int],
+        hop_lengths: List[int],
+        win_lengths: List[int],
     ) -> None:
         super().__init__()
+        self.save_hyperparameters()
         self.kernel_size = kernel_size
         self.stride = stride
         self.encoder_n_layers = encoder_n_layers
@@ -956,86 +1228,27 @@ class VADMobileNetV1(nn.Module):
         )
         self.vad = nn.Linear(hidden_channels, 1)
 
-        self.H_padding = 0
-        self.W_padding = 0
-        self.searching = False
-        self.found = False
 
-    def forward(self, waveforms):
-        x, vad = self._forward(waveforms)
-        x *= (1e4 * vad[..., None, None]).sigmoid()
-        return x
+class VADMobileNetV2(Base):
 
-    def _forward(self, x):
-        # Search padding if not already done
-        if not self.searching and not self.found:
-            self._search_padding(x)
-
-        H, W = x.shape[-2:]
-        x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
-
-        # encoder
-        downs = []
-        for downsampling_block in self.encoder:
-            x = downsampling_block(x)
-            downs.append(x)
-        downs = downs[::-1]
-
-        # attention & vad
-        b, c, h, w = x.shape
-        x = x.view(b, c, -1).permute(0, 2, 1)
-        x = self.bottleneck_attention(x, None)
-        vad = self.vad(x[:, 0, :])
-        x = x.permute(0, 2, 1).view(b, c, h, w)
-
-        # decoder
-        ups = []
-        for i, upsampling_block in enumerate(self.decoder):
-            ups.append(x)
-            skip_i = downs[i]
-            x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
-            x = upsampling_block(x)
-
-        x = x[:, :, -H:, -W:]
-        return x, vad
-
-    @torch.no_grad()
-    def _search_padding(self, x):
-        self.searching = True
-        H, W = x.shape[-2:]
-        out = self.forward(x)
-        while out.shape[-2] < H:
-            self.H_padding += 1
-            out = self.forward(x)
-        while out.shape[-1] < W:
-            self.W_padding += 1
-            out = self.forward(x)
-        self.found = True
-
-
-class MobileNetV2(nn.Module):
     def __init__(
         self,
+        nhead: int,
+        num_layers: int,
+        dropout: float,
         width_mult: float = 1.0,
-        layer_cofig: Optional[List[List[int]]] = None,
+        layer_config: Optional[List[List[int]]] = None,
         round_nearest: int = 8,
         block: Optional[Callable[..., nn.Module]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
         pad_value: float = 0,
-    ) -> None:
-        """
-        MobileNet V2 main class
-
-        Args:
-            width_mult (float): Width multiplier - adjusts number of channels in each layer by this amount
-            layer_cofig: Network structure
-            round_nearest (int): Round the number of channels in each layer to be a multiple of this number
-            Set to 1 to turn off rounding
-            block: Module specifying inverted residual building block for mobilenet
-            norm_layer: Module specifying the normalization layer to use
-
-        """
+        mr_stft_lambda: float = 0.5,
+        fft_sizes: List[int] = [512, 1024, 2048],
+        hop_lengths: List[int] = [50, 120, 240],
+        win_lengths: List[int] = [240, 600, 1200],
+    ):
         super().__init__()
+        self.save_hyperparameters()
         self.pad_value = pad_value
 
         if block is None:
@@ -1046,8 +1259,8 @@ class MobileNetV2(nn.Module):
 
         input_channel = 32
 
-        if layer_cofig is None:
-            self.layer_cofig = [
+        if layer_config is None:
+            self.layer_config = [
                 # t, c, n, s
                 [1, 16, 1, 1],
                 [6, 24, 2, 2],
@@ -1058,12 +1271,12 @@ class MobileNetV2(nn.Module):
                 [6, 320, 1, 1],
             ]
         else:
-            self.layer_cofig = layer_cofig
+            self.layer_config = layer_config
 
         # only check the first element, assuming user knows t,c,n,s are required
-        if len(self.layer_cofig) == 0 or len(self.layer_cofig[0]) != 4:
+        if len(self.layer_config) == 0 or len(self.layer_config[0]) != 4:
             raise ValueError(
-                f"layer_cofig should be non-empty or a 4-element list, got {self.layer_cofig}"
+                f"layer_config should be non-empty or a 4-element list, got {self.layer_config}"
             )
 
         # building first layer
@@ -1095,7 +1308,7 @@ class MobileNetV2(nn.Module):
         )
 
         # building inverted residual blocks
-        for t, c, n, s in self.layer_cofig:
+        for t, c, n, s in self.layer_config:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
                 stride = s if i == 0 else 1
@@ -1122,266 +1335,23 @@ class MobileNetV2(nn.Module):
                 )
                 input_channel = output_channel
 
-        # weight initialization
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.zeros_(m.bias)
-
-        self.H_padding = 0
-        self.W_padding = 0
-        self.searching = False
-        self.found = False
-
-    def forward(self, x: Tensor) -> Tensor:
-        # Search padding if not already done
-        if not self.searching and not self.found:
-            self._search_padding(x)
-
-        H, W = x.shape[-2:]
-        x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
-        downs = []
-        for downsampling_block in self.encoder:
-            x = downsampling_block(x)
-            downs.append(x)
-        downs = downs[::-1]
-
-        for i, upsampling_block in enumerate(self.decoder):
-            skip_i = downs[i]
-            x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
-            x = upsampling_block(x)
-        x = x[:, :, -H:, -W:]
-        return x
-
-    @torch.no_grad()
-    def _search_padding(self, x):
-        self.searching = True
-        H, W = x.shape[-2:]
-        out = self.forward(x)
-        while out.shape[-2] < H:
-            self.H_padding += 1
-            out = self.forward(x)
-        while out.shape[-1] < W:
-            self.W_padding += 1
-            out = self.forward(x)
-        self.found = True
-
-
-class VADLightningMobileNetV1(Model):
-
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        max_channels: int,
-        out_channels: int,
-        kernel_size: _size_2_t,
-        stride: _size_2_t,
-        padding: _size_2_t,
-        encoder_n_layers: int,
-        nhead: int,
-        num_layers: int,
-        dropout: float,
-        bias: bool,
-        pad_value: float,
-        mr_stft_lambda: float,
-        fft_sizes: List[int],
-        hop_lengths: List[int],
-        win_lengths: List[int],
-    ) -> None:
-        super().__init__()
-        self.save_hyperparameters()
-        self.model = VADMobileNetV1(
-            in_channels,
-            hidden_channels,
-            max_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            padding,
-            encoder_n_layers,
-            nhead,
-            num_layers,
-            dropout,
-            bias,
-            pad_value,
+        hidden_channels = self.layer_config[-1][1]
+        self.bottleneck_attention = TransformerEncoder(
+            d_word_vec=hidden_channels,
+            n_layers=num_layers,
+            n_head=nhead,
+            d_k=hidden_channels // nhead,
+            d_v=hidden_channels // nhead,
+            d_model=hidden_channels,
+            d_inner=hidden_channels,
+            dropout=dropout,
+            n_position=0,
+            scale_emb=False,
         )
-
-    def _shared_step(self, batch, batch_idx, stage):
-        noisy_waveforms, clean_waveforms, _ = batch
-        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
-        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
-        enhanced_waveforms, vad = self.model._forward(noisy_waveforms)
-        # enhanced_waveforms *= (1e4 * vad[..., None, None]).sigmoid()
-        vad_loss = F.binary_cross_entropy_with_logits(
-            vad.squeeze(),
-            ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
-        )
-        l1_loss = F.smooth_l1_loss(enhanced_waveforms, clean_waveforms, beta=0.5)
-        mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
-            enhanced_waveforms, clean_waveforms
-        )
-        loss = l1_loss + mrstft_loss + vad_loss
-        self.log_dict(
-            {f"{stage}_loss": loss},
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
-        return loss
+        self.vad = nn.Linear(hidden_channels, 1)
 
 
-class STFT(torch.nn.Module):
-    """adapted from Prem Seetharaman's https://github.com/pseeth/pytorch-stft"""
-
-    def __init__(self, max_frames, n_fft, hop_length, win_length, window):
-        super().__init__()
-        self.max_frames = max_frames
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.win_length = win_length
-        self.window = window
-        self.scale = n_fft / hop_length
-        self.pad_amount = n_fft // 2
-        self.cutoff = (self.n_fft // 2) + 1
-
-        fourier_basis = np.fft.fft(np.eye(self.n_fft))
-        fourier_basis = np.vstack(
-            [
-                np.real(fourier_basis[: self.cutoff, :]),
-                np.imag(fourier_basis[: self.cutoff, :]),
-            ]
-        )
-        forward_basis = torch.FloatTensor(fourier_basis[:, None, :]).detach()
-        inverse_basis = torch.FloatTensor(
-            np.linalg.pinv(self.scale * fourier_basis).T[:, None, :]
-        ).detach()
-        if window is not None:
-            assert n_fft >= win_length
-            # get window and zero center pad it to n_fft
-            fft_window = get_window(window, win_length, fftbins=True)
-            fft_window = pad_center(fft_window, size=n_fft)
-            fft_window = torch.from_numpy(fft_window).float()
-            # window the bases
-            forward_basis *= fft_window
-            inverse_basis *= fft_window
-        window_sum = self.window_sumsquare(
-            self.window,
-            self.max_frames,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-            n_fft=self.n_fft,
-            dtype=np.float32,
-        )
-        window_sum[window_sum == 0] = 1
-        window_sum = self.scale / window_sum
-        window_sum = torch.FloatTensor(window_sum).detach()
-
-        self.register_buffer("forward_basis", forward_basis)
-        self.register_buffer("inverse_basis", inverse_basis)
-        self.register_buffer("window_sum", window_sum)
-
-    def forward(self, waveform):
-        waveform = F.pad(
-            waveform.squeeze(1), (self.pad_amount, self.pad_amount), mode="reflect"
-        )
-
-        forward_transform = F.conv1d(
-            waveform, self.forward_basis, stride=self.hop_length, padding=0
-        )
-
-        real = forward_transform[:, : self.cutoff, :]
-        imag = forward_transform[:, self.cutoff :, :]
-
-        log_magnitude = torch.sqrt(real**2 + imag**2).unsqueeze(1).clamp(min=1e-3).log()
-        phase = torch.atan2(imag, real)
-
-        return log_magnitude, phase
-
-    def inverse(self, log_magnitude, phase):
-        magnitude = log_magnitude.exp().squeeze(1)
-        recombine_magnitude_phase = torch.cat(
-            [magnitude * torch.cos(phase), magnitude * torch.sin(phase)], dim=1
-        )
-        inverse_transform = F.conv_transpose1d(
-            recombine_magnitude_phase,
-            self.inverse_basis,
-            stride=self.hop_length,
-            padding=0,
-        )
-        if self.window is not None:
-            inverse_transform *= self.window_sum[: inverse_transform.size(-1)]
-
-        inverse_transform = inverse_transform[
-            :, None, :, self.pad_amount : -self.pad_amount
-        ]
-        inverse_transform = inverse_transform.clamp(min=-1.0, max=1.0)
-        return inverse_transform
-
-    @staticmethod
-    def window_sumsquare(
-        window,
-        n_frames,
-        hop_length=200,
-        win_length=800,
-        n_fft=800,
-        dtype=np.float32,
-        norm=None,
-    ):
-        """
-        # from librosa 0.6
-        Compute the sum-square envelope of a window function at a given hop length.
-        This is used to estimate modulation effects induced by windowing
-        observations in short-time fourier transforms.
-        Parameters
-        ----------
-        window : string, tuple, number, callable, or list-like
-            Window specification, as in `get_window`
-        n_frames : int > 0
-            The number of analysis frames
-        hop_length : int > 0
-            The number of samples to advance between frames
-        win_length : [optional]
-            The length of the window function.  By default, this matches `n_fft`.
-        n_fft : int > 0
-            The length of each analysis frame.
-        dtype : np.dtype
-            The data type of the output
-        Returns
-        -------
-        wss : np.ndarray, shape=`(n_fft + hop_length * (n_frames - 1))`
-            The sum-squared envelope of the window function
-        """
-        if win_length is None:
-            win_length = n_fft
-
-        n = n_fft + hop_length * (n_frames - 1)
-        x = np.zeros(n, dtype=dtype)
-
-        # Compute the squared window at the desired length
-        win_sq = get_window(window, win_length, fftbins=True)
-        win_sq = librosa_util.normalize(win_sq, norm=norm) ** 2
-        win_sq = librosa_util.pad_center(win_sq, size=n_fft)
-
-        # Fill the envelope
-        for i in range(n_frames):
-            sample = i * hop_length
-            x[sample : min(n, sample + n_fft)] += win_sq[
-                : max(0, min(n_fft, n - sample))
-            ]
-        return x
-
-
-class LightningSpectral(Model):
+class VADSpectralV1(BaseSpectral):
     def __init__(
         self,
         in_channels: int,
@@ -1403,17 +1373,8 @@ class LightningSpectral(Model):
         win_length: Optional[int],
         window: str,
     ):
-        super().__init__()
+        super().__init__(max_frames, n_fft, hop_length, win_length, window)
         self.save_hyperparameters()
-        hop_length = hop_length if hop_length is not None else n_fft // 4
-        win_length = win_length if win_length is not None else n_fft
-        self.stft = STFT(
-            max_frames=max_frames,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            win_length=win_length,
-            window=window,
-        )
         self.model = VADMobileNetV1(
             in_channels,
             hidden_channels,
@@ -1430,137 +1391,27 @@ class LightningSpectral(Model):
             pad_value,
         )
 
-    def forward(self, waveforms):
-        # Compute the STFT to get magnitude and phase
-        log_magnitudes, phases = self.stft.forward(waveforms)
 
-        # Apply filters
-        log_magnitudes, vad = self._forward(log_magnitudes)
-
-        # Reconstruct the waveform from the magnitude and phase
-        waveforms = self.stft.inverse(log_magnitudes, phases)
-        waveforms *= (1e4 * vad[..., None, None]).sigmoid()
-
-        return waveforms
-
-    def _forward(self, log_magnitudes):
-        log_magnitudes = (log_magnitudes + 2) * 0.5
-        filters, vad = self.model._forward(log_magnitudes)
-        log_magnitudes = (log_magnitudes * filters).clamp(min=-2.46, max=4)
-        log_magnitudes = log_magnitudes * 2 - 2
-        return log_magnitudes, vad
-
-    def _shared_step(self, batch, batch_idx, stage):
-        noisy_waveforms, clean_waveforms, _ = batch
-        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
-        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
-        noisy_log_magnitudes, phases = self.stft.forward(noisy_waveforms)
-        clean_log_magnitudes, _ = self.stft.forward(clean_waveforms)
-        enhanced_log_magnitudes, vad = self._forward(noisy_log_magnitudes)
-
-        # Log-magnitude loss
-        spectral_loss = F.l1_loss(enhanced_log_magnitudes, clean_log_magnitudes)
-
-        # Voice activity detection loss
-        vad_loss = F.binary_cross_entropy_with_logits(
-            vad.squeeze(),
-            ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
-        )
-
-        # Waveform loss
-        enhanced_waveforms = self.stft.inverse(enhanced_log_magnitudes, phases)
-        waveform_loss = F.smooth_l1_loss(
-            enhanced_waveforms, clean_waveforms[:, 0, 0, :], beta=0.5
-        )
-
-        loss = waveform_loss + spectral_loss + vad_loss
-        self.log_dict(
-            {
-                f"{stage}_loss": loss,
-                f"{stage}_vad_loss": vad_loss,
-                f"{stage}_waveform_loss": waveform_loss,
-                f"{stage}_spectral_loss": spectral_loss,
-            },
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
-        return loss
-
-
-class LightningMobileNetV2(Model):
+class VADSpectralV2(BaseSpectral):
     def __init__(
         self,
         n_fft: int,
         hop_length: Optional[int],
         win_length: Optional[int],
         window: str,
-        layer_cofig: List[List[int]],
+        nhead: int,
+        num_layers: int,
+        dropout: float,
+        layer_config: List[List[int]],
         pad_value: float,
         max_frames: int,
     ):
-        super().__init__()
+        super().__init__(max_frames, n_fft, hop_length, win_length, window)
         self.save_hyperparameters()
-        hop_length = hop_length if hop_length is not None else n_fft // 4
-        win_length = win_length if win_length is not None else n_fft
-        self.stft = STFT(
-            max_frames=max_frames,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            win_length=win_length,
-            window=window,
+        self.model = VADMobileNetV2(
+            nhead=nhead,
+            num_layers=num_layers,
+            dropout=dropout,
+            layer_config=layer_config,
+            pad_value=pad_value,
         )
-        self.model = MobileNetV2(layer_cofig=layer_cofig, pad_value=pad_value)
-
-    def forward(self, waveforms):
-        # Compute the STFT to get magnitude and phase
-        log_magnitudes, phases = self.stft.forward(waveforms)
-
-        # Apply filters
-        log_magnitudes = self._forward(log_magnitudes)
-
-        # Reconstruct the waveform from the magnitude and phase
-        waveforms = self.stft.inverse(log_magnitudes, phases)
-
-        return waveforms
-
-    def _forward(self, log_magnitudes):
-        log_magnitudes = (log_magnitudes + 2) * 0.5
-        filters = self.model.forward(log_magnitudes)
-        log_magnitudes = (log_magnitudes * filters).clamp(min=-2.46, max=4)
-        log_magnitudes = log_magnitudes * 2 - 2
-        return log_magnitudes
-
-    def _shared_step(self, batch, batch_idx, stage):
-        noisy_waveforms, clean_waveforms, _ = batch
-        noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
-        clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
-        noisy_log_magnitudes, phases = self.stft.forward(noisy_waveforms)
-        clean_log_magnitudes, _ = self.stft.forward(clean_waveforms)
-        enhanced_log_magnitudes = self._forward(noisy_log_magnitudes)
-
-        # Log-magnitude loss
-        spectral_loss = F.l1_loss(enhanced_log_magnitudes, clean_log_magnitudes)
-
-        # Waveform loss
-        enhanced_waveforms = self.stft.inverse(enhanced_log_magnitudes, phases)
-        waveform_loss = F.smooth_l1_loss(
-            enhanced_waveforms, clean_waveforms[:, 0, 0, :], beta=0.5
-        )
-
-        loss = waveform_loss + spectral_loss
-        self.log_dict(
-            {
-                f"{stage}_loss": loss,
-                f"{stage}_waveform_loss": waveform_loss,
-                f"{stage}_spectral_loss": spectral_loss,
-            },
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
-        return loss
