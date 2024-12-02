@@ -586,6 +586,8 @@ class Base(pl.LightningModule):
             self._search_padding(x)
 
         H, W = x.shape[-2:]
+        std = x.std() + 1e-3
+        x = x / std
         x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
 
         # encoder
@@ -607,7 +609,7 @@ class Base(pl.LightningModule):
             skip_i = downs[i]
             x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
             x = upsampling_block(x)
-        x = x[:, :, -H:, -W:]
+        x = x[:, :, -H:, -W:] * std
 
         return x, vad
 
