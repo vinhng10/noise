@@ -329,7 +329,6 @@ class ConvTranspose2dNormActivation(ConvNormActivation):
         inplace: Optional[bool] = True,
         bias: Optional[bool] = None,
     ) -> None:
-
         super().__init__(
             in_channels,
             out_channels,
@@ -577,7 +576,7 @@ class Base(pl.LightningModule):
 
     def forward(self, waveforms):
         x, vad = self._forward(waveforms)
-        x *= (1e4 * vad[..., None, None]).sigmoid()
+        # x *= (1e4 * vad[..., None, None]).sigmoid()
         return x
 
     def _forward(self, x):
@@ -643,8 +642,8 @@ class Base(pl.LightningModule):
         self.log_dict(
             {
                 f"{stage}_loss": loss,
-                f"{stage}_l1_loss": l1_loss,
-                f"{stage}_mrstft_loss": mrstft_loss,
+                f"{stage}_waveform_loss": l1_loss,
+                f"{stage}_spectral_loss": mrstft_loss,
                 f"{stage}_vad_loss": vad_loss,
             },
             on_step=False,
@@ -728,7 +727,7 @@ class BaseSpectral(Base):
 
         # Reconstruct the waveform from the magnitude and phase
         waveforms = self.stft.inverse(log_magnitudes, phases)
-        waveforms *= (1e4 * vad[..., None, None]).sigmoid()
+        # waveforms *= (1e4 * vad[..., None, None]).sigmoid()
 
         return waveforms
 
@@ -970,169 +969,6 @@ class BaseSpectral(Base):
 #         )
 
 
-class MobileNetV2(nn.Module):
-    def __init__(
-        self,
-        width_mult: float = 1.0,
-        layer_config: Optional[List[List[int]]] = None,
-        round_nearest: int = 8,
-        block: Optional[Callable[..., nn.Module]] = None,
-        norm_layer: Optional[Callable[..., nn.Module]] = None,
-        pad_value: float = 0,
-    ) -> None:
-        """
-        MobileNet V2 main class
-
-        Args:
-            width_mult (float): Width multiplier - adjusts number of channels in each layer by this amount
-            layer_config: Network structure
-            round_nearest (int): Round the number of channels in each layer to be a multiple of this number
-            Set to 1 to turn off rounding
-            block: Module specifying inverted residual building block for mobilenet
-            norm_layer: Module specifying the normalization layer to use
-
-        """
-        super().__init__()
-        self.pad_value = pad_value
-
-        if block is None:
-            block = InvertedResidual
-
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
-
-        input_channel = 32
-
-        if layer_config is None:
-            self.layer_config = [
-                # t, c, n, s
-                [1, 16, 1, 1],
-                [6, 24, 2, 2],
-                [6, 32, 3, 2],
-                [6, 64, 4, 2],
-                [6, 96, 3, 1],
-                [6, 160, 3, 2],
-                [6, 320, 1, 1],
-            ]
-        else:
-            self.layer_config = layer_config
-
-        # only check the first element, assuming user knows t,c,n,s are required
-        if len(self.layer_config) == 0 or len(self.layer_config[0]) != 4:
-            raise ValueError(
-                f"layer_config should be non-empty or a 4-element list, got {self.layer_config}"
-            )
-
-        # building first layer
-        input_channel = _make_divisible(input_channel * width_mult, round_nearest)
-
-        self.encoder = nn.ModuleList(
-            [
-                Conv2dNormActivation(
-                    1,
-                    input_channel,
-                    stride=2,
-                    norm_layer=norm_layer,
-                    activation_layer=nn.ReLU6,
-                )
-            ]
-        )
-
-        self.decoder = nn.ModuleList(
-            [
-                nn.ConvTranspose2d(
-                    input_channel,
-                    1,
-                    kernel_size=1,
-                    stride=2,
-                    padding=0,
-                    output_padding=0,
-                )
-            ]
-        )
-
-        # building inverted residual blocks
-        for t, c, n, s in self.layer_config:
-            output_channel = _make_divisible(c * width_mult, round_nearest)
-            for i in range(n):
-                stride = s if i == 0 else 1
-                self.encoder.append(
-                    InvertedResidual(
-                        input_channel,
-                        output_channel,
-                        stride,
-                        expand_ratio=t,
-                        dw_layer=Conv2dNormActivation,
-                        norm_layer=norm_layer,
-                    )
-                )
-                self.decoder.insert(
-                    0,
-                    InvertedResidual(
-                        output_channel,
-                        input_channel,
-                        stride,
-                        expand_ratio=t,
-                        dw_layer=ConvTranspose2dNormActivation,
-                        norm_layer=norm_layer,
-                    ),
-                )
-                input_channel = output_channel
-
-        # weight initialization
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out")
-            elif isinstance(m, nn.ConvTranspose2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_in")
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.zeros_(m.bias)
-
-        self.H_padding = 0
-        self.W_padding = 0
-        self.searching = False
-        self.found = False
-
-    def forward(self, x: Tensor) -> Tensor:
-        # Search padding if not already done
-        if not self.searching and not self.found:
-            self._search_padding(x)
-
-        H, W = x.shape[-2:]
-        x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
-
-        # encoder
-        downs = []
-        for downsampling_block in self.encoder:
-            x = downsampling_block(x)
-            downs.append(x)
-        downs = downs[::-1]
-
-        for i, upsampling_block in enumerate(self.decoder):
-            skip_i = downs[i]
-            x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
-            x = upsampling_block(x)
-        x = x[:, :, -H:, -W:]
-        return x
-
-    @torch.no_grad()
-    def _search_padding(self, x):
-        self.searching = True
-        H, W = x.shape[-2:]
-        out = self.forward(x)
-        while out.shape[-2] < H:
-            self.H_padding += 1
-            out = self.forward(x)
-        while out.shape[-1] < W:
-            self.W_padding += 1
-            out = self.forward(x)
-        self.found = True
-
-
 class VADMobileNetV1(Base):
 
     def __init__(
@@ -1240,6 +1076,8 @@ class VADMobileNetV2(Base):
         dropout: float,
         width_mult: float = 1.0,
         layer_config: Optional[List[List[int]]] = None,
+        kernel_size: _size_2_t = (1, 3),
+        stride: _size_2_t = (1, 2),
         round_nearest: int = 8,
         block: Optional[Callable[..., nn.Module]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
@@ -1289,7 +1127,8 @@ class VADMobileNetV2(Base):
                 Conv2dNormActivation(
                     1,
                     input_channel,
-                    stride=2,
+                    kernel_size=kernel_size,
+                    stride=stride,
                     norm_layer=norm_layer,
                     activation_layer=nn.ReLU6,
                 )
@@ -1298,13 +1137,13 @@ class VADMobileNetV2(Base):
 
         self.decoder = nn.ModuleList(
             [
-                nn.ConvTranspose2d(
+                ConvTranspose2dNormActivation(
                     input_channel,
                     1,
-                    kernel_size=1,
-                    stride=2,
-                    padding=0,
-                    output_padding=0,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    norm_layer=None,
+                    activation_layer=None,
                 )
             ]
         )
