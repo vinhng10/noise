@@ -350,16 +350,14 @@ class InvertedResidual(nn.Module):
         self,
         inp: int,
         oup: int,
-        stride: int,
+        kernel_size: Union[int, Tuple[int, int]],
+        stride: Union[int, Tuple[int, int]],
         expand_ratio: int,
         dw_layer: Optional[Callable[..., nn.Module]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
         super().__init__()
         self.stride = stride
-        if stride not in [1, 2]:
-            raise ValueError(f"stride should be 1 or 2 instead of {stride}")
-
         if dw_layer is None:
             dw_layer = Conv2dNormActivation
 
@@ -367,7 +365,7 @@ class InvertedResidual(nn.Module):
             norm_layer = nn.BatchNorm2d
 
         hidden_dim = int(round(inp * expand_ratio))
-        self.use_res_connect = self.stride == 1 and inp == oup
+        self.use_res_connect = stride[-1] == 1 and inp == oup
 
         layers: List[nn.Module] = []
         if expand_ratio != 1:
@@ -387,6 +385,7 @@ class InvertedResidual(nn.Module):
                 dw_layer(
                     hidden_dim,
                     hidden_dim,
+                    kernel_size=kernel_size,
                     stride=stride,
                     groups=hidden_dim,
                     norm_layer=norm_layer,
@@ -399,7 +398,7 @@ class InvertedResidual(nn.Module):
         )
         self.conv = nn.Sequential(*layers)
         self.out_channels = oup
-        self._is_cn = stride > 1
+        self._is_cn = stride[-1] > 1
 
     def forward(self, x: Tensor) -> Tensor:
         if self.use_res_connect:
@@ -1075,9 +1074,7 @@ class VADMobileNetV2(Base):
         num_layers: int,
         dropout: float,
         width_mult: float = 1.0,
-        layer_config: Optional[List[List[int]]] = None,
-        kernel_size: _size_2_t = (1, 3),
-        stride: _size_2_t = (1, 2),
+        layer_config: Optional[List[List[Union[int, Tuple[int, ...]]]]] = None,
         round_nearest: int = 8,
         block: Optional[Callable[..., nn.Module]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
@@ -1097,38 +1094,38 @@ class VADMobileNetV2(Base):
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
 
-        input_channel = 32
-
         if layer_config is None:
             self.layer_config = [
-                # t, c, n, s
-                [1, 16, 1, 1],
-                [6, 24, 2, 2],
-                [6, 32, 3, 2],
-                [6, 64, 4, 2],
-                [6, 96, 3, 1],
-                [6, 160, 3, 2],
-                [6, 320, 1, 1],
+                # t, c, n, k, s
+                [1, 32, 1, [3, 3], [1, 2]],
+                [1, 16, 1, [3, 3], [1, 1]],
+                [6, 24, 2, [3, 3], [2, 2]],
+                [6, 32, 3, [3, 3], [2, 2]],
+                [6, 64, 4, [3, 3], [2, 2]],
+                [6, 96, 3, [3, 3], [1, 1]],
+                [6, 160, 3, [3, 3], [2, 2]],
+                [6, 320, 1, [3, 3], [1, 1]],
             ]
         else:
             self.layer_config = layer_config
 
         # only check the first element, assuming user knows t,c,n,s are required
-        if len(self.layer_config) == 0 or len(self.layer_config[0]) != 4:
+        if len(self.layer_config) == 0 or len(self.layer_config[0]) != 5:
             raise ValueError(
                 f"layer_config should be non-empty or a 4-element list, got {self.layer_config}"
             )
 
         # building first layer
+        _, input_channel, _, k, s = self.layer_config.pop(0)
         input_channel = _make_divisible(input_channel * width_mult, round_nearest)
 
         self.encoder = nn.ModuleList(
             [
                 Conv2dNormActivation(
-                    1,
-                    input_channel,
-                    kernel_size=kernel_size,
-                    stride=stride,
+                    in_channels=1,
+                    out_channels=input_channel,
+                    kernel_size=k,
+                    stride=s,
                     norm_layer=norm_layer,
                     activation_layer=nn.ReLU6,
                 )
@@ -1138,10 +1135,10 @@ class VADMobileNetV2(Base):
         self.decoder = nn.ModuleList(
             [
                 ConvTranspose2dNormActivation(
-                    input_channel,
-                    1,
-                    kernel_size=kernel_size,
-                    stride=stride,
+                    in_channels=input_channel,
+                    out_channels=1,
+                    kernel_size=k,
+                    stride=s,
                     norm_layer=None,
                     activation_layer=None,
                 )
@@ -1149,15 +1146,16 @@ class VADMobileNetV2(Base):
         )
 
         # building inverted residual blocks
-        for t, c, n, s in self.layer_config:
+        for t, c, n, k, s in self.layer_config:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
-                stride = s if i == 0 else 1
+                stride = s if i == 0 else [1, 1]
                 self.encoder.append(
                     InvertedResidual(
-                        input_channel,
-                        output_channel,
-                        stride,
+                        inp=input_channel,
+                        oup=output_channel,
+                        kernel_size=k,
+                        stride=stride,
                         expand_ratio=t,
                         dw_layer=Conv2dNormActivation,
                         norm_layer=norm_layer,
@@ -1166,9 +1164,10 @@ class VADMobileNetV2(Base):
                 self.decoder.insert(
                     0,
                     InvertedResidual(
-                        output_channel,
-                        input_channel,
-                        stride,
+                        inp=output_channel,
+                        oup=input_channel,
+                        kernel_size=k,
+                        stride=stride,
                         expand_ratio=t,
                         dw_layer=ConvTranspose2dNormActivation,
                         norm_layer=norm_layer,
@@ -1243,7 +1242,7 @@ class VADSpectralV2(BaseSpectral):
         nhead: int,
         num_layers: int,
         dropout: float,
-        layer_config: List[List[int]],
+        layer_config: Optional[List[List[Union[int, Tuple[int, ...]]]]],
         pad_value: float,
         max_frames: int,
     ):
