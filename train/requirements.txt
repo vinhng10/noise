@@ -4,7 +4,6 @@ torch
 librosa
 lightning
 tqdm
-pyroomacoustics
 pyyaml
 onnx
 onnxruntime

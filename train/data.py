@@ -264,11 +264,6 @@ class NoiseDataModule(pl.LightningDataModule):
                     leave_length_unchanged=True,
                     p=p,
                 ),
-                BitCrush(
-                    min_bit_depth=8,
-                    max_bit_depth=12,
-                    p=p,
-                ),
                 ToTensor(p=1.0),
             ]
         )
@@ -301,11 +296,6 @@ class NoiseDataModule(pl.LightningDataModule):
                     min_absorption_value=0.075,
                     max_absorption_value=0.4,
                     leave_length_unchanged=True,
-                    p=p,
-                ),
-                BitCrush(
-                    min_bit_depth=8,
-                    max_bit_depth=12,
                     p=p,
                 ),
                 ToTensor(p=1.0),
@@ -472,11 +462,6 @@ class VADNoiseDataModule(NoiseDataModule):
                 PolarityInversion(p=p),
                 AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 ImpulseResponse(sounds_path=f"{data_dir}/train/ir", p=0.5),
-                BitCrush(
-                    min_bit_depth=8,
-                    max_bit_depth=12,
-                    p=p,
-                ),
                 Clip(p=1.0),
                 ToTensor(p=1.0),
             ]
@@ -507,11 +492,6 @@ class VADNoiseDataModule(NoiseDataModule):
                 PolarityInversion(p=p),
                 AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 ImpulseResponse(sounds_path=f"{data_dir}/val/ir", p=0.5),
-                BitCrush(
-                    min_bit_depth=8,
-                    max_bit_depth=12,
-                    p=p,
-                ),
                 Clip(p=1.0),
                 ToTensor(p=1.0),
             ]
