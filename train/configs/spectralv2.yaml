@@ -84,16 +84,16 @@ fit:
         [6, 96, 2, [3, 3], [2, 2]],
         [6, 160, 1, [3, 3], [1, 1]],
       ]
-    pad_value: -2.4538776394910684 # (math.log(1e-3) + 2) * 0.5
-    max_frames: 8000
-    n_fft: 320
-    hop_length: 160
-    win_length: 320
+    pad_value: -1
+    max_frames: 48000
+    n_fft: 480
+    hop_length: 80
+    win_length: 480
     window: hann
   data:
     data_dir: ./data
     sampling_rate: 16000
-    length: 0
+    length: 16000
     num_samples: 10000
     num_workers: 4
     batch_size: 16

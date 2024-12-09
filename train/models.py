@@ -574,9 +574,11 @@ class Base(pl.LightningModule):
         self.found = False
 
     def forward(self, waveforms):
-        x, vad = self._forward(waveforms)
-        # x *= (1e4 * vad[..., None, None]).sigmoid()
-        return x
+        waveforms = self._normalize(waveforms)
+        waveforms, vad = self._forward(waveforms)
+        waveforms *= (1e4 * vad[..., None, None]).sigmoid()
+        waveforms = self._denormalize(waveforms)
+        return waveforms
 
     def _forward(self, x):
         # Search padding if not already done
@@ -584,8 +586,6 @@ class Base(pl.LightningModule):
             self._search_padding(x)
 
         H, W = x.shape[-2:]
-        std = x.std() + 1e-3
-        x = x / std
         x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=self.pad_value)
 
         # encoder
@@ -607,9 +607,20 @@ class Base(pl.LightningModule):
             skip_i = downs[i]
             x = x + skip_i[:, :, -x.shape[-2] :, -x.shape[-1] :]
             x = upsampling_block(x)
-        x = x[:, :, -H:, -W:] * std
+        x = x[:, :, -H:, -W:]
 
         return x, vad
+
+    def _normalize(self, x):
+        self.max = torch.max(
+            x.abs().view(x.size(0), x.size(1), -1), dim=-1, keepdim=True
+        )[0].unsqueeze(2) + 1e-6
+        x = x / self.max
+        return x
+
+    def _denormalize(self, x):
+        x = x * self.max
+        return x
 
     @torch.no_grad()
     def _search_padding(self, x):
@@ -628,15 +639,26 @@ class Base(pl.LightningModule):
         noisy_waveforms, clean_waveforms, _ = batch
         noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
         clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
+
+        noisy_waveforms = self._normalize(noisy_waveforms)
         enhanced_waveforms, vad = self._forward(noisy_waveforms)
+        enhanced_waveforms = self._denormalize(enhanced_waveforms)
+
+        # Voice activity detection loss
         vad_loss = F.binary_cross_entropy_with_logits(
             vad.squeeze(),
             ((clean_waveforms.abs() > 0).sum(dim=-1) >= 160).float().squeeze(),
         )
+
+        # Waveform loss
         l1_loss = F.smooth_l1_loss(enhanced_waveforms, clean_waveforms, beta=0.5)
+
+        # Spectral loss
         mrstft_loss = self.hparams.mr_stft_lambda * self.multi_resolution_stft_loss(
             enhanced_waveforms, clean_waveforms
         )
+
+        # Total loss
         loss = l1_loss + mrstft_loss + vad_loss
         self.log_dict(
             {
@@ -726,23 +748,25 @@ class BaseSpectral(Base):
 
         # Reconstruct the waveform from the magnitude and phase
         waveforms = self.stft.inverse(log_magnitudes, phases)
-        # waveforms *= (1e4 * vad[..., None, None]).sigmoid()
+        waveforms *= (1e4 * vad[..., None, None]).sigmoid()
 
         return waveforms
 
     def _forward(self, log_magnitudes):
-        log_magnitudes = (log_magnitudes + 2) * 0.5
+        log_magnitudes = self._normalize(log_magnitudes)
         filters, vad = self.model._forward(log_magnitudes)
-        log_magnitudes = (log_magnitudes * filters).clamp(min=-2.46, max=4)
-        log_magnitudes = log_magnitudes * 2 - 2
+        log_magnitudes = (log_magnitudes * filters).clamp(min=-1.0, max=1.0)
+        log_magnitudes = self._denormalize(log_magnitudes)
         return log_magnitudes, vad
 
     def _shared_step(self, batch, batch_idx, stage):
         noisy_waveforms, clean_waveforms, _ = batch
         noisy_waveforms = noisy_waveforms.view(-1, 1, 1, 8000)
         clean_waveforms = clean_waveforms.view(-1, 1, 1, 8000)
+
         noisy_log_magnitudes, phases = self.stft.forward(noisy_waveforms)
         clean_log_magnitudes, _ = self.stft.forward(clean_waveforms)
+
         enhanced_log_magnitudes, vad = self._forward(noisy_log_magnitudes)
 
         # Spectral loss
@@ -760,6 +784,7 @@ class BaseSpectral(Base):
             enhanced_waveforms, clean_waveforms[:, 0, 0, :], beta=0.5
         )
 
+        # Total loss
         loss = waveform_loss + spectral_loss + vad_loss
         self.log_dict(
             {
