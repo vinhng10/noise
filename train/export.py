@@ -1,8 +1,9 @@
 import torch
 import onnx
 from models import *
-from data import NoiseDataModule
-from onnxconverter_common import float16
+from data import *
+
+# from onnxconverter_common import float16
 from onnxruntime.quantization import (
     quantize_static,
     quantize_dynamic,
@@ -15,10 +16,10 @@ from onnxruntime.quantization.shape_inference import quant_pre_process
 
 class DataReader(CalibrationDataReader):
     def __init__(self):
-        self.data_module = NoiseDataModule(
-            data_dir="data-debug",
-            sampling_rate=48000,
-            length=0,
+        self.data_module = VADNoiseDataModule(
+            data_dir="data",
+            sampling_rate=16000,
+            length=24000,
             num_workers=1,
             batch_size=1,
         )
@@ -30,55 +31,40 @@ class DataReader(CalibrationDataReader):
         batch = next(self.dataset, None)
         if batch is None:
             return None
-        return {"input": batch[0].detach().cpu().numpy()}
+        batch = batch[0].detach().cpu().numpy()
+        return {"input": batch}
 
     def rewind(self):
         self.dataset = iter(self.data_module.train_dataloader())
 
 
 if __name__ == "__main__":
-    # checkpoint = torch.load(
-    #     "./logs/mobilenetv1-2.0.0/checkpoints/epoch=829-train_loss=1.064.ckpt",
-    #     map_location=torch.device("cpu"),
-    # )
-    # checkpoint["state_dict"] = {
-    #     f"model.{k}": v for k, v in checkpoint["state_dict"].items()
-    # }
-    # checkpoint["hyper_parameters"].pop("_instantiator")
-    # model = LightningMobileNetV1(
-    #     **checkpoint["hyper_parameters"],
-    # )
-    # model.load_state_dict(state_dict=checkpoint["state_dict"])
+    n = 50
 
-    model = MobileNetV1(
-        in_channels=1,
-        hidden_channels=32,
-        max_channels=256,
-        out_channels=1,
-        kernel_size=3,
-        stride=2,
-        padding=0,
-        encoder_n_layers=4,
-        nhead=8,
-        num_layers=1,
-        dropout=0.0,
-        bias=False,
-        src_sampling_rate=48000,
-        tgt_sampling_rate=16000,
+    model = VADSpectralV2.load_from_checkpoint(
+        "./logs/spectralv2-2.0.0/checkpoints/epoch=192-val_loss=0.257.ckpt",
+        map_location=torch.device("cpu"),
     )
+
     model = model.eval()
 
     torch.onnx.export(
         model,
-        torch.randn((1, 1, 1, 48000)),
-        "/workspaces/noise/demo/src/model.onnx",
+        torch.randn((1, 1, 1, 160 * n)),
+        "../demo/src/model.onnx",
         export_params=True,
-        do_constant_folding=True,
+        do_constant_folding=False,
         input_names=["input"],
         output_names=["output"],
     )
 
-    # quantize_dynamic(
+    # model = onnx.load("fp32-model.onnx")
+    # model_fp16 = float16.convert_float_to_float16(model)
+    # onnx.save(model_fp16, "../demo/src/model.onnx")
+
+    # quantize_static(
     #     "fp32-model.onnx",
-    #     "/workspaces/noise/demo/src/model.onnx",
+    #     "../demo/src/model.onnx",
+    #     DataReader(),
+    #     activation_type=QuantType.
     # )
