@@ -755,7 +755,8 @@ class BaseSpectral(Base):
     def _forward(self, log_magnitudes):
         log_magnitudes = self._normalize(log_magnitudes)
         filters, vad = self.model._forward(log_magnitudes)
-        log_magnitudes = (log_magnitudes * filters).clamp(min=-1.0, max=1.0)
+        # Additive instead of multiplicative filters.
+        log_magnitudes = (log_magnitudes + filters).clamp(min=-1.0, max=1.0)
         log_magnitudes = self._denormalize(log_magnitudes)
         return log_magnitudes, vad
 
@@ -802,195 +803,195 @@ class BaseSpectral(Base):
         return loss
 
 
-# class Discriminator(nn.Module):
-#     def __init__(
-#         self,
-#         in_channels: int,
-#         hidden_channels: int,
-#         max_channels: int,
-#         kernel_size: int,
-#         stride: int,
-#         padding: int,
-#         encoder_n_layers: int,
-#         bias: bool,
-#     ) -> None:
-#         super().__init__()
-#         self.discriminator = nn.ModuleList(
-#             [
-#                 nn.Sequential(
-#                     nn.Conv2d(
-#                         in_channels,
-#                         hidden_channels,
-#                         kernel_size=(1, kernel_size),
-#                         stride=(1, stride),
-#                         padding=(0, padding),
-#                         bias=bias,
-#                     ),
-#                     nn.ReLU(inplace=True),
-#                 )
-#             ]
-#         )
-#         for i in range(encoder_n_layers):
-#             in_channels = hidden_channels
-#             hidden_channels = min(hidden_channels * 2, max_channels)
-#             self.discriminator.append(
-#                 DepthwiseSeparableConv(
-#                     in_channels, hidden_channels, kernel_size, stride, padding, bias
-#                 )
-#             )
+class Discriminator(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        encoder_n_layers: int,
+        bias: bool,
+    ) -> None:
+        super().__init__()
+        self.discriminator = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        in_channels,
+                        hidden_channels,
+                        kernel_size=(1, kernel_size),
+                        stride=(1, stride),
+                        padding=(0, padding),
+                        bias=bias,
+                    ),
+                    nn.ReLU(inplace=True),
+                )
+            ]
+        )
+        for i in range(encoder_n_layers):
+            in_channels = hidden_channels
+            hidden_channels = min(hidden_channels * 2, max_channels)
+            self.discriminator.append(
+                DepthwiseSeparableConv(
+                    in_channels, hidden_channels, kernel_size, stride, padding, bias
+                )
+            )
 
-#         L = 160000
-#         for _ in range(len(self.discriminator)):
-#             L = 1 + np.floor((L - kernel_size) / stride)
-#         self.head = nn.Sequential(nn.Linear(int(L), 1), nn.Sigmoid())
+        L = 160000
+        for _ in range(len(self.discriminator)):
+            L = 1 + np.floor((L - kernel_size) / stride)
+        self.head = nn.Sequential(nn.Linear(int(L), 1), nn.Sigmoid())
 
-#     def forward(self, x: torch.FloatTensor):
-#         for layer in self.discriminator:
-#             x = layer(x)
-#         x = self.head(x.squeeze(dim=2))
-#         x = x.squeeze(dim=2).mean(dim=1, keepdim=True)
-#         return x
+    def forward(self, x: torch.FloatTensor):
+        for layer in self.discriminator:
+            x = layer(x)
+        x = self.head(x.squeeze(dim=2))
+        x = x.squeeze(dim=2).mean(dim=1, keepdim=True)
+        return x
 
 
-# class GAN(pl.LightningModule):
-#     def __init__(
-#         self,
-#         in_channels: int,
-#         hidden_channels: int,
-#         max_channels: int,
-#         out_channels: int,
-#         kernel_size: int,
-#         stride: int,
-#         padding: int,
-#         encoder_n_layers: int,
-#         nhead: int,
-#         num_layers: int,
-#         dropout: float,
-#         bias: bool,
-#         src_sampling_rate: int,
-#         tgt_sampling_rate: int,
-#         generator_optimizer: Dict[str, Any],
-#         discriminator_optimizer: Dict[str, Any],
-#     ) -> None:
-#         super().__init__()
-#         self.save_hyperparameters()
-#         self.automatic_optimization = False
+class GAN(pl.LightningModule):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        max_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        encoder_n_layers: int,
+        nhead: int,
+        num_layers: int,
+        dropout: float,
+        bias: bool,
+        src_sampling_rate: int,
+        tgt_sampling_rate: int,
+        generator_optimizer: Dict[str, Any],
+        discriminator_optimizer: Dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+        self.automatic_optimization = False
 
-#         # encoder and decoder
-#         self.generator = MobileNetV1(
-#             in_channels,
-#             hidden_channels,
-#             max_channels,
-#             out_channels,
-#             kernel_size,
-#             stride,
-#             padding,
-#             encoder_n_layers,
-#             nhead,
-#             num_layers,
-#             dropout,
-#             bias,
-#             src_sampling_rate,
-#             tgt_sampling_rate,
-#         )
-#         self.discriminator = Discriminator(
-#             in_channels,
-#             hidden_channels,
-#             max_channels,
-#             kernel_size,
-#             stride,
-#             padding,
-#             encoder_n_layers - 2,
-#             bias,
-#         )
+        # encoder and decoder
+        self.generator = MobileNetV1(
+            in_channels,
+            hidden_channels,
+            max_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            encoder_n_layers,
+            nhead,
+            num_layers,
+            dropout,
+            bias,
+            src_sampling_rate,
+            tgt_sampling_rate,
+        )
+        self.discriminator = Discriminator(
+            in_channels,
+            hidden_channels,
+            max_channels,
+            kernel_size,
+            stride,
+            padding,
+            encoder_n_layers - 2,
+            bias,
+        )
 
-#     def forward(self, waveforms):
-#         x = torchaudio.functional.resample(
-#             waveforms,
-#             self.hparams.src_sampling_rate,
-#             self.hparams.tgt_sampling_rate,
-#         )
+    def forward(self, waveforms):
+        x = torchaudio.functional.resample(
+            waveforms,
+            self.hparams.src_sampling_rate,
+            self.hparams.tgt_sampling_rate,
+        )
 
-#         x = self.generator._forward(x)
+        x = self.generator._forward(x)
 
-#         x = torchaudio.functional.resample(
-#             x,
-#             self.hparams.tgt_sampling_rate,
-#             self.hparams.src_sampling_rate,
-#         )
-#         return x
+        x = torchaudio.functional.resample(
+            x,
+            self.hparams.tgt_sampling_rate,
+            self.hparams.src_sampling_rate,
+        )
+        return x
 
-#     def adversarial_loss(self, y_hat, y):
-#         return F.binary_cross_entropy(y_hat, y)
+    def adversarial_loss(self, y_hat, y):
+        return F.binary_cross_entropy(y_hat, y)
 
-#     def configure_optimizers(self):
-#         g_optimizer = torch.optim.AdamW(
-#             self.generator.parameters(), **self.hparams.generator_optimizer
-#         )
-#         d_optimizer = torch.optim.AdamW(
-#             self.discriminator.parameters(), **self.hparams.discriminator_optimizer
-#         )
-#         return [g_optimizer, d_optimizer], []
+    def configure_optimizers(self):
+        g_optimizer = torch.optim.AdamW(
+            self.generator.parameters(), **self.hparams.generator_optimizer
+        )
+        d_optimizer = torch.optim.AdamW(
+            self.discriminator.parameters(), **self.hparams.discriminator_optimizer
+        )
+        return [g_optimizer, d_optimizer], []
 
-#     def training_step(self, batch):
-#         noisy_waveforms, clean_waveforms, _ = batch
-#         B = clean_waveforms.shape[0]
+    def training_step(self, batch):
+        noisy_waveforms, clean_waveforms, _ = batch
+        B = clean_waveforms.shape[0]
 
-#         g_optimizer, d_optimizer = self.optimizers()
+        g_optimizer, d_optimizer = self.optimizers()
 
-#         # train generator
-#         # generate images
-#         self.toggle_optimizer(g_optimizer)
-#         enhanced_waveforms = self.generator._forward(noisy_waveforms)
+        # train generator
+        # generate images
+        self.toggle_optimizer(g_optimizer)
+        enhanced_waveforms = self.generator._forward(noisy_waveforms)
 
-#         l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
+        l1_loss = F.l1_loss(enhanced_waveforms, clean_waveforms)
 
-#         # ground truth result (ie: all fake)
-#         # put on GPU because we created this tensor inside training_loop
-#         valid = torch.ones(B, 1, device=clean_waveforms.device)
+        # ground truth result (ie: all fake)
+        # put on GPU because we created this tensor inside training_loop
+        valid = torch.ones(B, 1, device=clean_waveforms.device)
 
-#         # adversarial loss is binary cross-entropy
-#         g_loss = self.adversarial_loss(self.discriminator(enhanced_waveforms), valid)
-#         self.manual_backward(g_loss + l1_loss)
-#         g_optimizer.step()
-#         g_optimizer.zero_grad()
-#         self.untoggle_optimizer(g_optimizer)
+        # adversarial loss is binary cross-entropy
+        g_loss = self.adversarial_loss(self.discriminator(enhanced_waveforms), valid)
+        self.manual_backward(g_loss + l1_loss)
+        g_optimizer.step()
+        g_optimizer.zero_grad()
+        self.untoggle_optimizer(g_optimizer)
 
-#         # train discriminator
-#         # Measure discriminator's ability to classify real from generated samples
-#         self.toggle_optimizer(d_optimizer)
+        # train discriminator
+        # Measure discriminator's ability to classify real from generated samples
+        self.toggle_optimizer(d_optimizer)
 
-#         # how well can it label as real?
-#         valid = torch.ones(B, 1, device=clean_waveforms.device)
-#         d_real = self.discriminator(clean_waveforms)
-#         real_loss = self.adversarial_loss(d_real, valid)
+        # how well can it label as real?
+        valid = torch.ones(B, 1, device=clean_waveforms.device)
+        d_real = self.discriminator(clean_waveforms)
+        real_loss = self.adversarial_loss(d_real, valid)
 
-#         # how well can it label as fake?
-#         fake = torch.zeros(B, 1, device=clean_waveforms.device)
-#         d_fake = self.discriminator(enhanced_waveforms.detach())
-#         fake_loss = self.adversarial_loss(d_fake, fake)
+        # how well can it label as fake?
+        fake = torch.zeros(B, 1, device=clean_waveforms.device)
+        d_fake = self.discriminator(enhanced_waveforms.detach())
+        fake_loss = self.adversarial_loss(d_fake, fake)
 
-#         # discriminator loss is the average of these
-#         d_loss = (real_loss + fake_loss) / 2
-#         self.manual_backward(d_loss)
-#         d_optimizer.step()
-#         d_optimizer.zero_grad()
-#         self.untoggle_optimizer(d_optimizer)
+        # discriminator loss is the average of these
+        d_loss = (real_loss + fake_loss) / 2
+        self.manual_backward(d_loss)
+        d_optimizer.step()
+        d_optimizer.zero_grad()
+        self.untoggle_optimizer(d_optimizer)
 
-#         self.log_dict(
-#             {
-#                 "l1_loss": l1_loss,
-#                 "g_loss": g_loss,
-#                 "d_loss": d_loss,
-#                 "real_acc": d_real.mean(),
-#                 "fake_acc": d_fake.mean(),
-#             },
-#             on_step=False,
-#             on_epoch=True,
-#             prog_bar=True,
-#             logger=True,
-#             sync_dist=True,
-#         )
+        self.log_dict(
+            {
+                "l1_loss": l1_loss,
+                "g_loss": g_loss,
+                "d_loss": d_loss,
+                "real_acc": d_real.mean(),
+                "fake_acc": d_fake.mean(),
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
 
 
 class VADMobileNetV1(Base):
@@ -1122,7 +1123,7 @@ class VADMobileNetV2(Base):
         if layer_config is None:
             self.layer_config = [
                 # t, c, n, k, s
-                [1, 32, 1, [3, 3], [1, 2]],
+                [1, 32, 1, [3, 3], [2, 2]],
                 [1, 16, 1, [3, 3], [1, 1]],
                 [6, 24, 2, [3, 3], [2, 2]],
                 [6, 32, 3, [3, 3], [2, 2]],
