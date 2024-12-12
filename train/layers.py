@@ -1,3 +1,4 @@
+import copy
 from typing import Callable, List, Optional, OrderedDict, Tuple, Union
 import numpy as np
 import torch
@@ -22,26 +23,26 @@ def get_same_padding(kernel_size):
         return p1, p2
     assert isinstance(kernel_size, int), "kernel size should be either `int` or `tuple`"
     assert kernel_size % 2 > 0, "kernel size should be odd number"
-    return kernel_size // 2
+    return (kernel_size - 1) // 2
 
 
-def build_activation(act_func, inplace=True):
-    if act_func == "relu":
+def build_activation(activation, inplace=True):
+    if activation == "relu":
         return nn.ReLU(inplace=inplace)
-    elif act_func == "relu6":
+    elif activation == "relu6":
         return nn.ReLU6(inplace=inplace)
-    elif act_func == "tanh":
+    elif activation == "tanh":
         return nn.Tanh()
-    elif act_func == "sigmoid":
+    elif activation == "sigmoid":
         return nn.Sigmoid()
-    elif act_func == "h_swish":
+    elif activation == "h_swish":
         return Hswish(inplace=inplace)
-    elif act_func == "h_sigmoid":
+    elif activation == "h_sigmoid":
         return Hsigmoid(inplace=inplace)
-    elif act_func is None or act_func == "none":
+    elif activation is None or activation == "none":
         return None
     else:
-        raise ValueError("do not support: %s" % act_func)
+        raise ValueError("do not support: %s" % activation)
 
 
 def val2list(val, repeat_time=1):
@@ -71,6 +72,13 @@ def make_divisible(v, divisor, min_val=None):
     if new_v < 0.9 * v:
         new_v += divisor
     return new_v
+
+
+def adjust_bn_according_to_idx(bn, idx):
+    bn.weight.data = torch.index_select(bn.weight.data, 0, idx)
+    bn.bias.data = torch.index_select(bn.bias.data, 0, idx)
+    bn.running_mean.data = torch.index_select(bn.running_mean.data, 0, idx)
+    bn.running_var.data = torch.index_select(bn.running_var.data, 0, idx)
 
 
 class Hswish(nn.Module):
@@ -125,10 +133,10 @@ class DynamicSeparableConv2d(nn.Module):
             raise ValueError(f"Unsupported conv layer: {conv_layer}")
 
         self.conv = conv_layer(
-            self.max_in_channels,
-            self.max_in_channels,
-            max(self.kernel_size_list),
-            self.stride,
+            in_channels=self.max_in_channels,
+            out_channels=self.max_in_channels,
+            kernel_size=max(self.kernel_size_list),
+            stride=self.stride,
             groups=self.max_in_channels,
             bias=False,
         )
@@ -196,14 +204,26 @@ class DynamicSeparableConv2d(nn.Module):
 
         padding = get_same_padding(kernel_size)
         y = self.conv_fn(
-            x, filters, None, self.stride, padding, self.dilation, in_channel
+            input=x,
+            weight=filters,
+            bias=None,
+            stride=self.stride,
+            padding=padding,
+            dilation=self.dilation,
+            groups=in_channel,
         )
         return y
 
 
 class DynamicPointConv2d(nn.Module):
     def __init__(
-        self, max_in_channels, max_out_channels, kernel_size=1, stride=1, dilation=1
+        self,
+        max_in_channels,
+        max_out_channels,
+        kernel_size=1,
+        stride=1,
+        dilation=1,
+        conv_layer: Callable[..., nn.Module] = nn.Conv2d,
     ):
         super().__init__()
 
@@ -213,10 +233,17 @@ class DynamicPointConv2d(nn.Module):
         self.stride = stride
         self.dilation = dilation
 
-        self.conv = nn.Conv2d(
-            self.max_in_channels,
-            self.max_out_channels,
-            self.kernel_size,
+        if conv_layer is nn.Conv2d:
+            self.conv_fn = F.conv2d
+        elif conv_layer is nn.ConvTranspose2d:
+            self.conv_fn = F.conv_transpose2d
+        else:
+            raise ValueError(f"Unsupported conv layer: {conv_layer}")
+
+        self.conv = conv_layer(
+            in_channels=self.max_in_channels,
+            out_channels=self.max_out_channels,
+            kernel_size=self.kernel_size,
             stride=self.stride,
             bias=False,
         )
@@ -227,10 +254,21 @@ class DynamicPointConv2d(nn.Module):
         if out_channel is None:
             out_channel = self.active_out_channel
         in_channel = x.size(1)
-        filters = self.conv.weight[:out_channel, :in_channel, :, :].contiguous()
+        if self.conv_fn is F.conv2d:
+            filters = self.conv.weight[:out_channel, :in_channel, :, :].contiguous()
+        else:
+            filters = self.conv.weight[:in_channel, :out_channel, :, :].contiguous()
 
         padding = get_same_padding(self.kernel_size)
-        y = F.conv2d(x, filters, None, self.stride, padding, self.dilation, 1)
+        y = self.conv_fn(
+            input=x,
+            weight=filters,
+            bias=None,
+            stride=self.stride,
+            padding=padding,
+            dilation=self.dilation,
+            groups=1,
+        )
         return y
 
 
@@ -284,7 +322,8 @@ class DynamicConv2dNormActivation(nn.Module):
         stride=1,
         dilation=1,
         use_bn=True,
-        act_func="relu6",
+        activation="relu6",
+        conv_layer: Callable[..., nn.Module] = nn.Conv2d,
     ):
         super().__init__()
 
@@ -294,7 +333,7 @@ class DynamicConv2dNormActivation(nn.Module):
         self.stride = stride
         self.dilation = dilation
         self.use_bn = use_bn
-        self.act_func = act_func
+        self.activation = activation
 
         self.conv = DynamicPointConv2d(
             max_in_channels=max(self.in_channel_list),
@@ -302,10 +341,11 @@ class DynamicConv2dNormActivation(nn.Module):
             kernel_size=self.kernel_size,
             stride=self.stride,
             dilation=self.dilation,
+            conv_layer=conv_layer,
         )
         if self.use_bn:
             self.bn = DynamicBatchNorm2d(max(self.out_channel_list))
-        self.act = build_activation(self.act_func, inplace=True)
+        self.act = build_activation(self.activation, inplace=True)
 
         self.active_out_channel = max(self.out_channel_list)
 
@@ -315,11 +355,12 @@ class DynamicConv2dNormActivation(nn.Module):
         x = self.conv(x)
         if self.use_bn:
             x = self.bn(x)
-        x = self.act(x)
+        if self.act:
+            x = self.act(x)
         return x
 
 
-class DynamicInvertedConv2d(nn.Module):
+class DynamicInvertedResidual(nn.Module):
     def __init__(
         self,
         in_channel_list: List[int],
@@ -344,27 +385,26 @@ class DynamicInvertedConv2d(nn.Module):
         max_middle_channel = round(
             max(self.in_channel_list) * max(self.expand_ratio_list)
         )
-        if max(self.expand_ratio_list) == 1:
-            self.inverted_bottleneck = None
-        else:
-            self.inverted_bottleneck = nn.Sequential(
-                OrderedDict(
-                    [
-                        (
-                            "conv",
-                            DynamicPointConv2d(
-                                max(self.in_channel_list), max_middle_channel
-                            ),
-                        ),
-                        ("bn", DynamicBatchNorm2d(max_middle_channel)),
-                        ("act", build_activation(self.activation, inplace=True)),
-                    ]
-                )
+
+        self.active_kernel_size = max(self.kernel_size_list)
+        self.active_expand_ratio = max(self.expand_ratio_list)
+        self.active_out_channel = max(self.out_channel_list)
+
+        self.inverted_bottleneck = None
+        self.depth_conv = None
+
+        if max(self.expand_ratio_list) > 1:
+            self.inverted_bottleneck = DynamicConv2dNormActivation(
+                in_channel_list=val2list(max(self.in_channel_list), 1),
+                out_channel_list=val2list(max_middle_channel, 1),
+                kernel_size=1,
+                stride=1,
+                dilation=1,
+                use_bn=True,
+                activation=self.activation,
             )
 
-        if dw_layer is None:
-            self.depth_conv = None
-        else:
+        if dw_layer is not None:
             self.depth_conv = nn.Sequential(
                 OrderedDict(
                     [
@@ -383,91 +423,100 @@ class DynamicInvertedConv2d(nn.Module):
                 )
             )
 
-        self.point_linear = nn.Sequential(
-            OrderedDict(
-                [
-                    (
-                        "conv",
-                        DynamicPointConv2d(
-                            max_middle_channel, max(self.out_channel_list)
-                        ),
-                    ),
-                    ("bn", DynamicBatchNorm2d(max(self.out_channel_list))),
-                ]
-            )
+        self.point_linear = DynamicConv2dNormActivation(
+            in_channel_list=val2list(max_middle_channel, 1),
+            out_channel_list=val2list(max(self.out_channel_list), 1),
+            kernel_size=1,
+            stride=1,
+            dilation=1,
+            use_bn=True,
+            activation=None,
         )
 
-        self.active_kernel_size = max(self.kernel_size_list)
-        self.active_expand_ratio = max(self.expand_ratio_list)
-        self.active_out_channel = max(self.out_channel_list)
-
     def forward(self, x: Tensor) -> Tensor:
+        x_orig = x
         in_channel = x.size(1)
 
+        # Inverted Bottleneck
         if self.inverted_bottleneck is not None:
             self.inverted_bottleneck.conv.active_out_channel = make_divisible(
                 round(in_channel * self.active_expand_ratio), 8
             )
-
-        self.depth_conv.conv.active_kernel_size = self.active_kernel_size
-        self.point_linear.conv.active_out_channel = self.active_out_channel
-
-        if self.inverted_bottleneck is not None:
             x = self.inverted_bottleneck(x)
+
+        # Depthwise Convolution
         if self.depth_conv is not None:
+            self.depth_conv.conv.active_kernel_size = self.active_kernel_size
             x = self.depth_conv(x)
+
+        # Pointwise Convolution
+        self.point_linear.conv.active_out_channel = self.active_out_channel
         x = self.point_linear(x)
+
+        # Skip connection
+        if self.stride == 1 and in_channel == self.active_out_channel:
+            x = x + x_orig
+
         return x
 
+    def re_organize_middle_weights(self, expand_ratio_stage=0):
+        importance = torch.sum(
+            torch.abs(self.point_linear.conv.conv.weight.data), dim=(0, 2, 3)
+        )  # over input ch
+        if expand_ratio_stage > 0:
+            sorted_expand_list = copy.deepcopy(self.expand_ratio_list)
+            sorted_expand_list.sort(reverse=True)
+            target_width = sorted_expand_list[expand_ratio_stage]
+            target_width = round(max(self.in_channel_list) * target_width)
+            importance[target_width:] = torch.arange(
+                0, target_width - importance.size(0), -1
+            )
 
-class DynamicInvertedResidual(nn.Module):
+        sorted_importance, sorted_idx = torch.sort(importance, dim=0, descending=True)
+        self.point_linear.conv.conv.weight.data = torch.index_select(
+            self.point_linear.conv.conv.weight.data, 1, sorted_idx
+        )
 
+        adjust_bn_according_to_idx(self.depth_conv.bn.bn, sorted_idx)
+        self.depth_conv.conv.conv.weight.data = torch.index_select(
+            self.depth_conv.conv.conv.weight.data, 0, sorted_idx
+        )
+
+        # TODO if inverted_bottleneck is None, the previous layer should be reorganized accordingly
+        if self.inverted_bottleneck is not None:
+            adjust_bn_according_to_idx(self.inverted_bottleneck.bn.bn, sorted_idx)
+            self.inverted_bottleneck.conv.conv.weight.data = torch.index_select(
+                self.inverted_bottleneck.conv.conv.weight.data, 0, sorted_idx
+            )
+            return None
+        else:
+            return sorted_idx
+
+
+class OFASpectralNets(nn.Module):
     def __init__(
         self,
-        mobile_inverted_conv: Optional[nn.Module],
-        shortcut: Optional[nn.Module],
+        base_stage_width="mcunet384",
+        base_depth: List[int] = [1, 2, 2, 2, 2, 2, 2],
+        depth_list: List[int] = [0, 1, 2],
+        width_mult_list: List[float] = [0.5, 0.75, 1.0],
+        kernel_size_list: List[int] = [3, 5, 7],
+        expand_ratio_list: List[int] = [3, 4, 6],
+        stride_list: List[int] = [1, 2, 2, 2, 1, 2, 1],
+        activation: str = "relu6",
     ):
         super().__init__()
-
-        self.mobile_inverted_conv = mobile_inverted_conv
-        self.shortcut = shortcut
-
-    def forward(self, x):
-        if self.mobile_inverted_conv is None:
-            ...
-        elif self.shortcut is None:
-            x = self.mobile_inverted_conv(x)
-        else:
-            x = self.mobile_inverted_conv(x) + self.shortcut(x)
-        return x
-
-
-class OFAMCUNets(nn.Module):
-    def __init__(
-        self,
-        n_classes=1000,
-        bn_param=(0.1, 1e-3),
-        dropout_rate=0.1,
-        base_stage_width=None,
-        base_depth=(2, 2, 2, 2, 2),
-        width_mult_list=1.0,
-        ks_list=3,
-        expand_ratio_list=6,
-        depth_list=4,
-        no_mix_layer=False,
-        fuse_blk1=False,
-        se_stages=None,
-    ):
-
         self.width_mult_list = val2list(width_mult_list, 1)
-        self.ks_list = val2list(ks_list, 1)
+        self.kernel_size_list = val2list(kernel_size_list, 1)
         self.expand_ratio_list = val2list(expand_ratio_list, 1)
         self.depth_list = val2list(depth_list, 1)
         self.base_stage_width = base_stage_width
         self.base_depth = base_depth
+        self.stride_list = stride_list
+        self.activation = activation
 
         self.width_mult_list.sort()
-        self.ks_list.sort()
+        self.kernel_size_list.sort()
         self.expand_ratio_list.sort()
         self.depth_list.sort()
 
@@ -483,167 +532,149 @@ class OFAMCUNets(nn.Module):
             make_divisible(base_stage_width[0] * width_mult, 8)
             for width_mult in self.width_mult_list
         ]
-        first_block_width = [
-            make_divisible(base_stage_width[1] * width_mult, 8)
-            for width_mult in self.width_mult_list
-        ]
-        last_channel = [
-            (
-                make_divisible(base_stage_width[-1] * width_mult, 8)
-                if width_mult > 1.0
-                else base_stage_width[-1]
-            )
-            for width_mult in self.width_mult_list
-        ]
 
-        # first conv layer
-        if len(input_channel) == 1:
-            first_conv = ConvLayer(
-                3,
-                max(input_channel),
-                kernel_size=3,
-                stride=2,
-                use_bn=True,
-                act_func="relu6",
-                ops_order="weight_bn_act",
-            )
-        else:
-            first_conv = DynamicConv2dNormActivation(
-                in_channel_list=val2list(3, len(input_channel)),
-                out_channel_list=input_channel,
-                kernel_size=3,
-                stride=2,
-                act_func="relu6",
-            )
-
-        # first block
-        if len(first_block_width) == 1:
-            first_block_conv = DynamicInvertedConv2d(
-                in_channel_list=max(input_channel),
-                out_channel_list=max(first_block_width),
-                kernel_size_list=3,
-                expand_ratio_list=1,
-                stride=1,
-                activation="relu6",
-                dw_layer=None,
-            )
-        else:
-            first_block_conv = DynamicInvertedConv2d(
-                in_channel_list=input_channel,
-                out_channel_list=first_block_width,
-                kernel_size_list=3,
-                expand_ratio_list=1,
-                stride=1,
-                activation="relu6",
-                dw_layer=None,
-            )
-        first_block = DynamicInvertedResidual(first_block_conv, None)
-
-        input_channel = first_block_width
-
-        # inverted residual blocks
-        self.block_group_info = []
-        blocks = [first_block]
+        # First conv layer
+        self.block_group_info = [[0]]
         _block_index = 1
+        self.encoder = nn.ModuleList(
+            [
+                DynamicConv2dNormActivation(
+                    in_channel_list=val2list(3, len(input_channel)),
+                    out_channel_list=input_channel,
+                    kernel_size=3,
+                    stride=2,
+                    activation=self.activation,
+                    conv_layer=nn.Conv2d,
+                )
+            ]
+        )
 
-        stride_stages = [2, 2, 2, 1, 2, 1]
-        if depth_list is None:
-            n_block_list = [2, 3, 4, 3, 3, 1]
-            self.depth_list = [4, 4]
-            print("Use MobileNetV2 Depth Setting")
-        else:
-            n_block_list = [
-                max(self.depth_list) + self.base_depth[i] for i in range(5)
-            ] + [1]
+        self.decoder = nn.ModuleList(
+            [
+                DynamicConv2dNormActivation(
+                    in_channel_list=input_channel,
+                    out_channel_list=val2list(3, len(input_channel)),
+                    kernel_size=3,
+                    stride=2,
+                    activation=self.activation,
+                    conv_layer=nn.ConvTranspose2d,
+                )
+            ]
+        )
 
-        width_list = []
-        for base_width in base_stage_width[2:-1]:
-            width = [
+        # Inverted residual blocks
+        n_block_list = [
+            base_depth + max(self.depth_list) * (i > 0)
+            for i, base_depth in enumerate(self.base_depth)
+        ]
+
+        width_list = [
+            [
                 make_divisible(base_width * width_mult, 8)
                 for width_mult in self.width_mult_list
             ]
-            width_list.append(width)
+            for base_width in base_stage_width[1:]
+        ]
 
-        if se_stages is None:
-            se_stages = [False] * (len(base_stage_width) - 3)
-            assert len(se_stages) == len(width_list)
-
-        for width, n_block, s, use_se in zip(
-            width_list, n_block_list, stride_stages, se_stages
+        for i, (width, n_block, stride) in enumerate(
+            zip(width_list, n_block_list, stride_list)
         ):
             self.block_group_info.append([_block_index + i for i in range(n_block)])
             _block_index += n_block
 
             output_channel = width
-            for i in range(n_block):
-                if i == 0:
-                    stride = s
-                else:
-                    stride = 1
+            for j in range(n_block):
 
-                mobile_inverted_conv = DynamicInvertedConv2d(
-                    in_channel_list=val2list(input_channel, 1),
-                    out_channel_list=val2list(output_channel, 1),
-                    kernel_size_list=ks_list,
-                    expand_ratio_list=expand_ratio_list,
-                    stride=stride,
-                    act_func="relu6",
-                    use_se=use_se[i] if isinstance(use_se, list) else use_se,
+                self.encoder.append(
+                    DynamicInvertedResidual(
+                        in_channel_list=val2list(input_channel, 1),
+                        out_channel_list=val2list(output_channel, 1),
+                        kernel_size_list=kernel_size_list,
+                        expand_ratio_list=expand_ratio_list if i != 0 else 1,
+                        stride=stride if j == 0 else 1,
+                        activation="relu6",
+                        dw_layer=nn.Conv2d,
+                    )
                 )
 
-                if stride == 1 and input_channel == output_channel:
-                    shortcut = IdentityLayer(input_channel, input_channel)
-                else:
-                    shortcut = None
-
-                mb_inverted_block = DynamicInvertedResidual(
-                    mobile_inverted_conv, shortcut
+                self.decoder.insert(
+                    0,
+                    DynamicInvertedResidual(
+                        in_channel_list=val2list(output_channel, 1),
+                        out_channel_list=val2list(input_channel, 1),
+                        kernel_size_list=kernel_size_list,
+                        expand_ratio_list=expand_ratio_list if i != 0 else 1,
+                        stride=stride if j == 0 else 1,
+                        activation="relu6",
+                        dw_layer=nn.ConvTranspose2d,
+                    ),
                 )
-
-                blocks.append(mb_inverted_block)
                 input_channel = output_channel
 
-        super(OFAMCUNets, self).__init__(
-            first_conv, blocks, feature_mix_layer, classifier
-        )
-
-        # set bn param
-        self.set_bn_param(momentum=bn_param[0], eps=bn_param[1])
+        # # set bn param
+        # self.set_bn_param(momentum=bn_param[0], eps=bn_param[1])
 
         # runtime_depth
         self.runtime_depth = [len(block_idx) for block_idx in self.block_group_info]
 
-    def forward(self, x):
-        # first conv
-        x = self.first_conv(x)
-        # first block
-        x = self.blocks[0](x)
+        self.H_padding = 0
+        self.W_padding = 0
+        self.searching = False
+        self.found = False
 
-        # blocks
+    @torch.no_grad()
+    def _search_padding(self, x):
+        self.searching = True
+        H, W = x.shape[-2:]
+        out = self.forward(x)
+        while out.shape[-2] < H:
+            self.H_padding += 1
+            out = self.forward(x)
+        while out.shape[-1] < W:
+            self.W_padding += 1
+            out = self.forward(x)
+        self.found = True
+
+    def forward(self, x):
+        # Search padding if not already done
+        if not self.searching and not self.found:
+            self._search_padding(x)
+
+        H, W = x.shape[-2:]
+        x = F.pad(x, (self.W_padding, 0, self.H_padding, 0), value=0.0)
+
+        # encoder
+        downs = []
         for stage_id, block_idx in enumerate(self.block_group_info):
             depth = self.runtime_depth[stage_id]
             active_idx = block_idx[:depth]
             for idx in active_idx:
-                x = self.blocks[idx](x)
+                x = self.encoder[idx](x)
+            downs.append(x)
 
-        # feature_mix_layer
-        if self.feature_mix_layer is not None:
-            x = self.feature_mix_layer(x)
-        x = x.mean(3).mean(2)
+        for stage_id in range(len(self.block_group_info) - 1, -1, -1):
+            block_idx = self.block_group_info[stage_id]
+            depth = self.runtime_depth[stage_id]
+            active_idx = block_idx[::-1][:depth]
+            skip = downs[stage_id]
+            x = x + skip[:, :, -x.shape[-2] :, -x.shape[-1] :]
+            for idx in active_idx:
+                x = self.decoder[25 - idx](x)
 
-        x = self.classifier(x)
+        x = x[:, :, -H:, -W:]
+
         return x
 
     @property
     def module_str(self):
         _str = self.first_conv.module_str + "\n"
-        _str += self.blocks[0].module_str + "\n"
+        _str += self.encoder[0].module_str + "\n"
 
         for stage_id, block_idx in enumerate(self.block_group_info):
             depth = self.runtime_depth[stage_id]
             active_idx = block_idx[:depth]
             for idx in active_idx:
-                _str += self.blocks[idx].module_str + "\n"
+                _str += self.encoder[idx].module_str + "\n"
         if self.feature_mix_layer is not None:
             _str += self.feature_mix_layer.module_str + "\n"
         _str += self.classifier.module_str + "\n"
@@ -652,16 +683,10 @@ class OFAMCUNets(nn.Module):
     @property
     def config(self):
         return {
-            "name": OFAMCUNets.__name__,
+            "name": OFASpectralNets.__name__,
             "bn": self.get_bn_param(),
             "first_conv": self.first_conv.config,
-            "blocks": [block.config for block in self.blocks],
-            "feature_mix_layer": (
-                None
-                if self.feature_mix_layer is None
-                else self.feature_mix_layer.config
-            ),
-            "classifier": self.classifier.config,
+            "encoder": [block.config for block in self.encoder],
         }
 
     """ Width Related Methods """
@@ -672,5 +697,5 @@ class OFAMCUNets(nn.Module):
                 " * WARNING: sorting is not implemented right for multiple width-mult"
             )
 
-        for block in self.blocks[1:]:
+        for block in self.encoder[1:]:
             block.mobile_inverted_conv.re_organize_middle_weights(expand_ratio_stage)
