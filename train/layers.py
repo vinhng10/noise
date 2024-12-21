@@ -496,6 +496,8 @@ class DynamicInvertedResidual(nn.Module):
 class OFASpectralNets(nn.Module):
     def __init__(
         self,
+        in_channels: int = 1,
+        out_channels: int = 1,
         base_stage_width="mcunet384",
         base_depth: List[int] = [1, 2, 2, 2, 2, 2, 2],
         depth_list: List[int] = [0, 1, 2],
@@ -539,7 +541,7 @@ class OFASpectralNets(nn.Module):
         self.encoder = nn.ModuleList(
             [
                 DynamicConv2dNormActivation(
-                    in_channel_list=val2list(3, len(input_channel)),
+                    in_channel_list=val2list(in_channels, len(input_channel)),
                     out_channel_list=input_channel,
                     kernel_size=3,
                     stride=2,
@@ -553,7 +555,7 @@ class OFASpectralNets(nn.Module):
             [
                 DynamicConv2dNormActivation(
                     in_channel_list=input_channel,
-                    out_channel_list=val2list(3, len(input_channel)),
+                    out_channel_list=val2list(out_channels, len(input_channel)),
                     kernel_size=3,
                     stride=2,
                     activation=self.activation,
@@ -664,6 +666,86 @@ class OFASpectralNets(nn.Module):
         x = x[:, :, -H:, -W:]
 
         return x
+
+    def get_active_subnet(self, preserve_weight=True):
+        def get_or_copy_subnet(m, **kwargs):
+            if hasattr(m, "get_active_subnet"):
+                out = m.get_active_subnet(preserve_weight=preserve_weight, **kwargs)
+            else:
+                out = copy.deepcopy(m)
+            return out
+
+        first_conv = get_or_copy_subnet(self.first_conv, in_channel=3)
+        input_channel = first_conv.out_channels
+
+        blocks = [
+            MobileInvertedResidualBlock(
+                get_or_copy_subnet(
+                    self.blocks[0].mobile_inverted_conv, in_channel=input_channel
+                ),
+                copy.deepcopy(self.blocks[0].shortcut),
+            )
+        ]
+
+        input_channel = blocks[0].mobile_inverted_conv.out_channels
+
+        # blocks
+        for stage_id, block_idx in enumerate(self.block_group_info):
+            depth = self.runtime_depth[stage_id]
+            active_idx = block_idx[:depth]
+            stage_blocks = []
+            for idx in active_idx:
+                stage_blocks.append(
+                    MobileInvertedResidualBlock(
+                        self.blocks[idx].mobile_inverted_conv.get_active_subnet(
+                            input_channel, preserve_weight
+                        ),
+                        copy.deepcopy(self.blocks[idx].shortcut),
+                    )
+                )
+                input_channel = stage_blocks[-1].mobile_inverted_conv.out_channels
+            blocks += stage_blocks
+
+        feature_mix_layer = get_or_copy_subnet(
+            self.feature_mix_layer, in_channel=input_channel
+        )
+        input_channel = (
+            feature_mix_layer.out_channels
+            if feature_mix_layer is not None
+            else input_channel
+        )
+        classifier = get_or_copy_subnet(self.classifier, in_features=input_channel)
+
+        _subnet = MCUNets(first_conv, blocks, feature_mix_layer, classifier)
+        _subnet.set_bn_param(**self.get_bn_param())
+        return _subnet
+
+    def set_active_subnet(self, wid=None, ks=None, e=None, d=None, **kwargs):
+        # add information to add a width multiplier
+        # width_mult_id = val2list(wid, 3 + len(self.block_group_info))
+        # print(' * Using a wid of ', wid)
+        for m in self.modules():
+            if hasattr(m, "out_channel_list"):
+                if wid is not None:
+                    m.active_out_channel = m.out_channel_list[wid]
+                else:
+                    m.active_out_channel = max(m.out_channel_list)
+
+        ks = val2list(ks, len(self.blocks) - 1)
+        expand_ratio = val2list(e, len(self.blocks) - 1)
+        depth = val2list(d, len(self.block_group_info))
+
+        for block, k, e in zip(self.blocks[1:], ks, expand_ratio):
+            if k is not None:
+                block.mobile_inverted_conv.active_kernel_size = k
+            if e is not None:
+                block.mobile_inverted_conv.active_expand_ratio = e
+
+        for i, d in enumerate(depth):
+            if d is not None:
+                self.runtime_depth[i] = min(len(self.block_group_info[i]), d) + (
+                    self.base_depth[i] if i < len(self.base_depth) else 1
+                )
 
     @property
     def module_str(self):
