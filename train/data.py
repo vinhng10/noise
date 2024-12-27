@@ -320,7 +320,7 @@ class NoiseDataModule(pl.LightningDataModule):
         if not data_dir.exists():
             s3 = boto3.client("s3")
             paginator = s3.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket="db-noise", Prefix="datasets/train/"):
+            for page in paginator.paginate(Bucket="db-noise", Prefix="datasets/train/clean/"):
                 if "Contents" in page:
                     for obj in page["Contents"]:
                         key = obj["Key"]
@@ -449,19 +449,12 @@ class VADNoiseDataModule(NoiseDataModule):
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/train/noise",
                     min_snr_db=-5.0,
-                    max_snr_db=30.0,
+                    max_snr_db=20.0,
                     p=1.0,
                 ),
-                Cut(length=length, is_val=False, p=1.0),
-                JustNoise(
-                    sounds_path=f"{data_dir}/train/noise",
-                    min_snr_db=-5.0,
-                    max_snr_db=30.0,
-                    p=p,
-                ),
-                PolarityInversion(p=p),
-                AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 ImpulseResponse(sounds_path=f"{data_dir}/train/ir", p=0.5),
+                Cut(length=length, is_val=False, p=1.0),
+                PolarityInversion(p=p),
                 Clip(p=1.0),
                 ToTensor(p=1.0),
             ]
@@ -479,19 +472,12 @@ class VADNoiseDataModule(NoiseDataModule):
                 AddBackgroundNoise(
                     sounds_path=f"{data_dir}/val/noise",
                     min_snr_db=-5.0,
-                    max_snr_db=30.0,
+                    max_snr_db=20.0,
                     p=1.0,
                 ),
-                Cut(length=length, is_val=True, p=1.0),
-                JustNoise(
-                    sounds_path=f"{data_dir}/val/noise",
-                    min_snr_db=-5.0,
-                    max_snr_db=30.0,
-                    p=p,
-                ),
-                PolarityInversion(p=p),
-                AddColorNoise(min_snr_db=-5.0, max_snr_db=30.0, p=p),
                 ImpulseResponse(sounds_path=f"{data_dir}/val/ir", p=0.5),
+                Cut(length=length, is_val=True, p=1.0),
+                PolarityInversion(p=p),
                 Clip(p=1.0),
                 ToTensor(p=1.0),
             ]

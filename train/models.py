@@ -612,9 +612,12 @@ class Base(pl.LightningModule):
         return x, vad
 
     def _normalize(self, x):
-        self.max = torch.max(
-            x.abs().view(x.size(0), x.size(1), -1), dim=-1, keepdim=True
-        )[0].unsqueeze(2) + 1e-6
+        self.max = (
+            torch.max(x.abs().view(x.size(0), x.size(1), -1), dim=-1, keepdim=True)[
+                0
+            ].unsqueeze(2)
+            + 1e-6
+        )
         x = x / self.max
         return x
 
@@ -781,9 +784,7 @@ class BaseSpectral(Base):
 
         # Waveform loss
         enhanced_waveforms = self.stft.inverse(enhanced_log_magnitudes, phases)
-        waveform_loss = F.smooth_l1_loss(
-            enhanced_waveforms, clean_waveforms[:, 0, 0, :], beta=0.5
-        )
+        waveform_loss = F.l1_loss(enhanced_waveforms, clean_waveforms[:, 0, 0, :])
 
         # Total loss
         loss = waveform_loss + spectral_loss + vad_loss

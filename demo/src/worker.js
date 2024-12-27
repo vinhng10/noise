@@ -1,9 +1,9 @@
-import * as ort from "onnxruntime-web/webgpu";
+import * as ort from "onnxruntime-web";
 
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
 
 const maxSize = 50;
-const size = 50;
+const size = 20;
 
 // Returns a low-pass transform function for use with TransformStream.
 const noiseFilter = (session) => {
@@ -69,7 +69,7 @@ const noiseFilter = (session) => {
 onmessage = async (event) => {
   const url = new URL("./model.onnx", import.meta.url);
   const session = await ort.InferenceSession.create(url.toString(), {
-    executionProviders: ["webgpu"],
+    executionProviders: ["wasm"],
   });
   const source = event.data.source;
   const sink = event.data.sink;
